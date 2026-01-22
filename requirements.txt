@@ -1,0 +1,18 @@
+# The Colony Manager: AI-Adversarial Survival System
+# Python dependencies
+
+# Core dependencies (Python 3.8+)
+# No external dependencies required for basic implementation
+# Add these if you want enhanced features:
+
+# For graph-based search algorithms (optional)
+# networkx>=3.0
+
+# For numerical computations in RL (optional)
+# numpy>=1.24.0
+
+# For testing
+# pytest>=7.0.0  # Alternative to unittest
+
+# For JSON schema validation (optional)
+# jsonschema>=4.0.0

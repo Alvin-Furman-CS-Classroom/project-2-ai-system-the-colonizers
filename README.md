@@ -1,34 +1,31 @@
-# The Colony Manager: AI-Adversarial Survival System
+# [Your System Title]
 
 ## Overview
 
-The Colony Manager is a turn-based survival simulation where a player manages a group of agents (colonists) in a hostile environment. The system tracks critical resources—Oxygen, Calories, and Integrity—which must remain above zero to keep agents alive. The player assigns tasks to agents, manages resource allocation, and responds to disruptions. The AI acts as an adversarial "Director" that evaluates colony weaknesses and selects disasters (e.g., hull breaches, resource shortages, equipment failures) using game-theoretic decision-making to challenge the player.
-
-Each turn follows four phases: Logic (rule enforcement checking constraints), Planning (task optimization via A* search), Adversarial (AI disaster selection via Minimax), and Resolution (resource consumption and event application). The system uses Propositional Logic to encode survival constraints (e.g., "no oxygen implies agent death") and Search algorithms to optimize task sequencing and logistics planning. The AI Director uses Minimax to evaluate colony states and choose disruptions that maximally challenge current resource vulnerabilities.
-
-This theme naturally integrates multiple AI techniques: state representation for colony management, Search for logistics optimization, Propositional Logic for constraint checking, and Game Theory for adversarial decision-making. The system demonstrates how AI can model both cooperative planning and adversarial dynamics within a unified survival framework.
+Provide a concise system overview (200-300 words). Explain the unifying theme and how the modules combine into a coherent AI system.
 
 ## Team
 
-- Adam Alvarado
-- Rick King
+- Member 1
+- Member 2
+- Member 3 (if applicable)
 
 ## Proposal
 
-(https://github.com/Alvin-Furman-CS-Classroom/project-1-proposal-alvaad4)
+Link to the approved Project 1 proposal (or paste a short summary here).
 
 ## Module Plan
 
 Your system must include 5-6 modules. Fill in the table below as you plan each module.
 
-| Module | Required Topic(s) | Topic Covered By | Checkpoint Due |
-| ------ | ----------------- | ---------------- | -------------- |
-| 1      | State Representation | Week 1 | Checkpoint 1 (Feb 11) |
-| 2      | Search (A*, IDA*, Beam Search) | Week 1.5-3 | Checkpoint 1-2 (Feb 11-26) |
-| 3      | Propositional Logic | Week 1-1.5 | Checkpoint 1-2 (Feb 11-26) |
-| 4      | Game Theory (Minimax, Alpha-Beta, MCTS) | Week 5.5-8.5 | Checkpoint 3 (March 19) |
-| 5      | Event Application Logic (state transitions) | After Module 4 | Checkpoint 3-4 (March 19 - April 2) |
-| 6      | Reinforcement Learning or Heuristics | Week 8.5-10 | Checkpoint 4-5 (April 2-16) |
+| Module | Topic(s) | Inputs | Outputs | Depends On | Checkpoint |
+| ------ | -------- | ------ | ------- | ---------- | ---------- |
+| 1 |  |  |  |  |  |
+| 2 |  |  |  |  |  |
+| 3 |  |  |  |  |  |
+| 4 |  |  |  |  |  |
+| 5 |  |  |  |  |  |
+| 6 (optional) |  |  |  |  |  |
 
 ## Repository Layout
 
@@ -84,3 +81,4 @@ Keep `AGENTS.md` updated with your module plan, constraints, and links to APIs/d
 ## References
 
 List libraries, APIs, datasets, and other references used by the system.
+ 

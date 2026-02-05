@@ -27,9 +27,12 @@ class TestSearchStateIntegration(unittest.TestCase):
         assignments = planner.plan_with_astar(tasks)
         # Should assign tasks based on agent proximity
         self.assertEqual(len(assignments), 2)
-        # Verify assignments reference valid agents
+        # Verify assignments reference valid agents (by ID)
+        agent_ids = {agent.get("id") for agent in state.agents}
         for assignment in assignments:
-            self.assertLess(assignment.agent_id, len(state.agents))
+            self.assertIn(assignment.agent_id, agent_ids)
+            # Verify pathfinding was used (path should be present)
+            self.assertIsNotNone(assignment.path)
 
 
 if __name__ == "__main__":

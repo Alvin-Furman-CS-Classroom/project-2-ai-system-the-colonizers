@@ -2,7 +2,7 @@
 
 ## System Overview
 
-The Colony Manager is a turn-based survival simulation where a player manages a group of agents (colonists) in a hostile environment. The system tracks critical resources—Oxygen, Calories, and Integrity—which must remain above zero to keep agents alive. The player assigns tasks to agents, manages resource allocation, and responds to disruptions. The AI acts as an adversarial "Director" that evaluates colony weaknesses and selects disasters (e.g., hull breaches, resource shortages, equipment failures) using game-theoretic decision-making to challenge the player.
+The Colony Manager is a turn-based survival simulation where a player manages a group of agents (colonists) in a hostile environment. The system tracks critical resources—Oxygen, Calories, and Integrity—which must remain above zero to keep agents alive. The player assigns tasks to agents, manages resource allocation, and responds to disruptions. The AI acts as an adversarial "Director" that evaluates colony weaknesses and selects disasters (e.g., hull breaches, resource shortages, equipment failures) using game-theoretic decision-making to challenge the player. A **difficulty setting** allows the player to choose how strong the Director is: it influences both the **selection algorithm** and the **search depth** used by the AI. On easier difficulties, the Director can use an algorithm that may not find the hardest path (e.g., a simple heuristic, MCTS with few iterations, or a greedy “target weakest resource” rule), so events are sometimes suboptimal and the game is more forgiving. On harder difficulties, the Director uses full Minimax or Alpha-Beta with greater depth for better prediction of the player, making the game tougher.
 
 Each turn follows four phases: Logic (rule enforcement checking constraints), Planning (task optimization via A* search), Adversarial (AI disaster selection via Minimax), and Resolution (resource consumption and event application). The system uses Propositional Logic to encode survival constraints (e.g., "no oxygen implies agent death") and Search algorithms to optimize task sequencing and logistics planning. The AI Director uses Minimax to evaluate colony states and choose disruptions that maximally challenge current resource vulnerabilities.
 
@@ -56,11 +56,13 @@ This theme naturally integrates multiple AI techniques: state representation for
 
 **Topics:** Games and Game Theory (Minimax, Alpha-Beta Pruning, MCTS)
 
-**Input:** Current colony state from Module 1 (resource levels, infrastructure vulnerabilities, agent locations), available event types (disaster catalog)
+**Input:** Current colony state from Module 1 (resource levels, infrastructure vulnerabilities, agent locations), available event types (disaster catalog), optional **difficulty** (e.g., easy / normal / hard) that influences search depth
 
 **Output:** Selected disaster/event specification (e.g., {"event_type": "hull_breach", "location": "section_alpha", "severity": 0.7, "resource_impact": {"oxygen": -20}})
 
 **Integration:** Analyzes Module 1 state to identify weaknesses. Uses Minimax/Alpha-Beta to select events that maximally challenge player. Outputs to Module 5 for application.
+
+**Difficulty, algorithm choice, and search depth:** A **difficulty choice** (e.g., Easy, Normal, Hard) will map to (1) **which selection algorithm** the Director uses and (2) the **lookahead depth** when using search-based algorithms. On **easier** difficulties, the Director can use an algorithm that has a chance of *not* finding the hardest path—e.g., a simple heuristic (“target weakest resource”), MCTS with few iterations, or greedy selection—so events are sometimes suboptimal and the game is more forgiving. On **harder** difficulties, the Director uses Minimax or Alpha-Beta with greater depth for near-optimal event choice. Using different algorithms per difficulty gives a clear way to scale challenge: easier settings rely on methods that may miss the best move; harder settings use full lookahead so the AI predicts the player better.
 
 **Prerequisites:** Modules 1-3, Games and Game Theory (Minimax, Alpha-Beta) - available by Week 5.5-8.5
 

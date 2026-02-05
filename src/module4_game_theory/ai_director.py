@@ -5,13 +5,22 @@ The AI Director uses game theory to select optimal disruptive events.
 It analyzes colony state, identifies vulnerabilities, and chooses events
 that maximally challenge the player using Minimax, Alpha-Beta, or MCTS.
 
+Game tree:
+- Director (max): chooses an event → state after event.
+- Player (min): chooses a "response" (e.g. which resource to recover) → state after response.
+- Score = challenge(state); Director maximizes, Player minimizes.
+
 Input: Current colony state, available event types
 Output: Selected disaster/event specification
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from src.module1_state.colony_state import ColonyState
+
+
+# Default recovery amount per "player response" in minimax (simplified model)
+DEFAULT_PLAYER_RECOVERY = 10.0
 
 
 @dataclass
@@ -44,26 +53,100 @@ class AIDirector:
     def select_event_minimax(self, colony_state: ColonyState, depth: int = 3) -> Event:
         """
         Select event using Minimax algorithm.
-        
-        Minimax evaluates possible event choices by simulating
-        future game states and choosing the event that maximizes
-        challenge (minimizes player's advantage).
-        
+
+        Assumes optimal play: Director maximizes challenge, Player minimizes it
+        (we model Player as choosing the best single-resource recovery each "turn").
+        Picks the event that has the highest minimax value (best for Director
+        after Player's best response).
+
         Args:
             colony_state: Current colony state
-            depth: How many turns ahead to look
-            
+            depth: Number of full plies (Director + Player pairs). 1 = one event then one response.
+
         Returns:
             Selected event
         """
-        # TODO: Implement Minimax
-        # 1. For each possible event, simulate application
-        # 2. Evaluate resulting state (challenge score)
-        # 3. Recursively consider player's best response
-        # 4. Choose event that maximizes challenge after player's best move
-        
-        # Placeholder: return event that targets weakest resource
-        return self._select_by_weakness(colony_state)
+        if not self.available_events:
+            raise ValueError("No events available")
+
+        best_value: float = float("-inf")
+        best_event: Event = self.available_events[0]
+
+        for event in self.available_events:
+            state_after_event = self._simulate_event(colony_state, event)
+            # Director just moved; now it's Player's turn (min)
+            value = self._minimax_min(state_after_event, depth - 1)
+            if value > best_value:
+                best_value = value
+                best_event = event
+
+        return best_event
+
+    def _get_state_challenge(self, state: ColonyState) -> float:
+        """
+        Score how challenging/vulnerable a state is (for the player).
+        Higher = more challenging = better for the Director.
+        """
+        score = 0.0
+        for resource, level in state.resources.items():
+            # Low resources = high challenge
+            score += (100.0 - max(0.0, min(100.0, level))) / 100.0
+        # Few agents = more vulnerability
+        agent_factor = max(0.0, 1.0 - len(state.agents) / 5.0)
+        score += agent_factor
+        return score
+
+    def _simulate_event(self, state: ColonyState, event: Event) -> ColonyState:
+        """
+        Return a copy of state with the event's resource impact applied.
+        Does not mutate the original state.
+        """
+        copy = state.copy()
+        copy.consume_resources(event.resource_impact)
+        return copy
+
+    def _get_player_responses(self, state: ColonyState) -> List[Dict[str, Any]]:
+        """
+        Simple model of player responses: choose one resource to recover by a fixed amount.
+        Returns a list of {"resource": name, "delta": amount} (positive = recovery).
+        """
+        responses: List[Dict[str, Any]] = [{}]  # do nothing
+        for resource in state.resources:
+            responses.append({"resource": resource, "delta": DEFAULT_PLAYER_RECOVERY})
+        return responses
+
+    def _simulate_player_response(
+        self, state: ColonyState, response: Dict[str, Any]
+    ) -> ColonyState:
+        """Return a copy of state with the player response applied."""
+        copy = state.copy()
+        if response:
+            copy.consume_resources(
+                {response["resource"]: response["delta"]}
+            )  # consume_resources adds the delta (positive = gain)
+        return copy
+
+    def _minimax_max(self, state: ColonyState, depth: int) -> float:
+        """Director's turn: maximize challenge over events."""
+        if depth <= 0:
+            return self._get_state_challenge(state)
+        best = float("-inf")
+        for event in self.available_events:
+            child = self._simulate_event(state, event)
+            value = self._minimax_min(child, depth - 1)
+            best = max(best, value)
+        return best
+
+    def _minimax_min(self, state: ColonyState, depth: int) -> float:
+        """Player's turn: minimize challenge over (simplified) responses."""
+        if depth <= 0:
+            return self._get_state_challenge(state)
+        best = float("inf")
+        for response in self._get_player_responses(state):
+            child = self._simulate_player_response(state, response)
+            value = self._minimax_max(child, depth - 1)
+            best = min(best, value)
+        return best
     
     def select_event_alphabeta(self, colony_state: ColonyState, depth: int = 3) -> Event:
         """

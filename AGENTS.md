@@ -1,7 +1,7 @@
 ## Project Context
 
-- System title: [Your System Title]
-- Theme: [Your Theme]
+- System title: [Your System Title]The Colony Manager
+- Theme: Ai-Adversarial Surbival System
 - Proposal link or summary: [Your Proposal Link or Summary]
 
 **Module plan:**

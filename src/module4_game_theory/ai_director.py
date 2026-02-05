@@ -257,7 +257,11 @@ class AIDirector:
             
         Returns:
             List of vulnerability descriptions
+        
+        TODO: Implement vulnerability identification
+        - Add a multiplier to weakness score based on resources avilibility (8 oxygen tanks is less vulnerable than 1 oxygen tank, so target the ones with the least amount)
         """
+
         vulnerabilities = []
         
         for resource, level in colony_state.resources.items():

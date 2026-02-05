@@ -44,6 +44,17 @@ class TestRuleEngine(unittest.TestCase):
         self.assertIn("violations_found", result)
         self.assertIn("state_after", result)
 
+    def test_multiple_deaths_removal_order(self):
+        """Test that multiple agents with zero oxygen are all removed (reverse index order)."""
+        self.state.add_agent({"id": 0, "name": "A", "location": (0, 0), "oxygen": 0.0, "calories": 50.0}, validate=False)
+        self.state.add_agent({"id": 1, "name": "B", "location": (1, 1), "oxygen": 0.0, "calories": 50.0}, validate=False)
+        self.state.add_agent({"id": 2, "name": "C", "location": (2, 2), "oxygen": 50.0, "calories": 50.0}, validate=False)
+        violations = self.rule_engine.check_violations(self.state)
+        self.rule_engine.apply_violations(self.state, violations)
+        # All three had oxygen; two had zero. Only one agent (C) should remain.
+        self.assertEqual(len(self.state.agents), 1)
+        self.assertEqual(self.state.agents[0]["name"], "C")
+
 
 if __name__ == "__main__":
     unittest.main()

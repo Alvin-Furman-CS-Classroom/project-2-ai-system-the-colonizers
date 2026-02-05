@@ -42,9 +42,11 @@ Task Schema:
     - Additional task-specific fields
 """
 
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Union
 import json
 import copy
+
+from .procedural_tiles import get_tile
 
 
 class ColonyState:
@@ -74,6 +76,7 @@ class ColonyState:
         self.infrastructure: Dict[str, Any] = state_data.get("infrastructure", {})
         self.active_tasks: List[Dict[str, Any]] = state_data.get("active_tasks", [])
         self.turn_number: int = state_data.get("turn_number", 0)
+        self.world_seed: int = state_data.get("world_seed", 0)
     
     def _create_empty_state(self) -> Dict[str, Any]:
         """Create an empty/default colony state."""
@@ -101,7 +104,8 @@ class ColonyState:
             "resources": self.resources,
             "infrastructure": self.infrastructure,
             "active_tasks": self.active_tasks,
-            "turn_number": self.turn_number
+            "turn_number": self.turn_number,
+            "world_seed": self.world_seed
         }
     
     def to_json(self) -> str:
@@ -126,6 +130,37 @@ class ColonyState:
         """
         data = json.loads(json_str)
         return cls(data)
+    
+    @staticmethod
+    def _normalize_location(loc: Any) -> Union[Tuple[int, int], str]:
+        """
+        Normalize location for comparison. (x, y) -> (int, int); string -> str.
+        """
+        if isinstance(loc, str):
+            return loc
+        if isinstance(loc, (tuple, list)) and len(loc) == 2:
+            return (int(loc[0]), int(loc[1]))
+        return loc  # fallback for invalid; comparison will fail as needed
+    
+    def get_agent_at_location(self, location: Any) -> Optional[Dict[str, Any]]:
+        """
+        Return the first agent at the given location, or None.
+        Used for collision checks: no two agents may share a location.
+        """
+        norm = self._normalize_location(location)
+        for agent in self.agents:
+            if "location" not in agent:
+                continue
+            if self._normalize_location(agent["location"]) == norm:
+                return agent
+        return None
+    
+    def get_tile_at(self, x: int, y: int) -> Dict[str, Any]:
+        """
+        Return procedurally generated tile data at world coordinates (x, y).
+        No map bounds: any (x, y) is valid; same coordinates always yield the same tile.
+        """
+        return get_tile(int(x), int(y), self.world_seed)
     
     def consume_resources(self, consumption: Dict[str, float]) -> None:
         """
@@ -164,6 +199,11 @@ class ColonyState:
             is_valid, errors = self.validate_agent(test_agent)
             if not is_valid:
                 return False, errors
+            # Collision: no other agent at the new location (if location is being updated)
+            if "location" in updates:
+                other = self.get_agent_at_location(updates["location"])
+                if other is not None and other is not self.agents[agent_id]:
+                    return False, [f"Location {updates['location']} already occupied by another agent"]
         
         self.agents[agent_id].update(updates)
         return True, []
@@ -251,6 +291,11 @@ class ColonyState:
             # Check for duplicate ID
             if self.get_agent_by_id(agent_data.get("id")) is not None:
                 return False, [f"Agent with id {agent_data.get('id')} already exists"]
+            
+            # Collision: no other agent at the same location
+            loc = agent_data.get("location")
+            if loc is not None and self.get_agent_at_location(loc) is not None:
+                return False, [f"Location {loc} already occupied by another agent"]
         
         self.agents.append(agent_data)
         return True, []
@@ -459,6 +504,19 @@ class ColonyState:
                 if agent_id in agent_ids:
                     errors.append(f"Duplicate agent ID: {agent_id}")
                 agent_ids.add(agent_id)
+        
+        # Collision: no two agents at the same location
+        seen_locations: Dict[Any, int] = {}
+        for i, agent in enumerate(self.agents):
+            loc = agent.get("location")
+            if loc is not None:
+                norm = self._normalize_location(loc)
+                if norm in seen_locations:
+                    errors.append(
+                        f"Agents {seen_locations[norm]} and {i} share the same location {loc}"
+                    )
+                else:
+                    seen_locations[norm] = i
         
         # Validate tasks
         task_ids = set()

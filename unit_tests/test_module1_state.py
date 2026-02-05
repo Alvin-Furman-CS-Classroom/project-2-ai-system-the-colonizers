@@ -316,3 +316,76 @@ class TestColonyState(unittest.TestCase):
         initial_turn = self.state.turn_number
         self.state.next_turn()
         self.assertEqual(self.state.turn_number, initial_turn + 1)
+
+    def test_add_agent_collision_rejected(self):
+        """Test that adding an agent at an occupied location is rejected."""
+        self.state.add_agent(self.valid_agent)
+        other = {**self.valid_agent, "id": 1, "name": "Other"}
+        other["location"] = (10, 15)  # same as valid_agent
+        success, errors = self.state.add_agent(other)
+        self.assertFalse(success)
+        self.assertTrue(any("already occupied" in e for e in errors))
+
+    def test_add_agent_different_locations_allowed(self):
+        """Test that two agents at different locations are allowed."""
+        self.state.add_agent(self.valid_agent)
+        other = {**self.valid_agent, "id": 1, "name": "Other", "location": (11, 15)}
+        success, errors = self.state.add_agent(other)
+        self.assertTrue(success)
+        self.assertEqual(len(self.state.agents), 2)
+
+    def test_update_agent_collision_rejected(self):
+        """Test that updating an agent to an occupied location is rejected."""
+        self.state.add_agent(self.valid_agent)
+        self.state.add_agent({**self.valid_agent, "id": 1, "name": "Other", "location": (5, 5)})
+        success, errors = self.state.update_agent(1, {"location": (10, 15)})
+        self.assertFalse(success)
+        self.assertTrue(any("already occupied" in e for e in errors))
+        self.assertEqual(self.state.agents[1]["location"], (5, 5))
+
+    def test_update_agent_same_location_allowed(self):
+        """Test that updating other fields while staying at same location is allowed."""
+        self.state.add_agent(self.valid_agent)
+        success, errors = self.state.update_agent(0, {"oxygen": 50.0})
+        self.assertTrue(success)
+        self.assertEqual(self.state.agents[0]["location"], (10, 15))
+
+    def test_get_agent_at_location(self):
+        """Test getting agent at a location."""
+        self.state.add_agent(self.valid_agent)
+        agent = self.state.get_agent_at_location((10, 15))
+        self.assertIsNotNone(agent)
+        self.assertEqual(agent["id"], 0)
+        self.assertIsNone(self.state.get_agent_at_location((99, 99)))
+
+    def test_get_tile_at_procedural(self):
+        """Test procedural tile generation (no map bounds)."""
+        tile = self.state.get_tile_at(0, 0)
+        self.assertIn("terrain", tile)
+        self.assertIn("passable", tile)
+        self.assertIn(tile["terrain"], ["grass", "water", "rock", "sand", "dirt"])
+        self.assertIsInstance(tile["passable"], bool)
+        # Same coords same seed -> same tile
+        again = self.state.get_tile_at(0, 0)
+        self.assertEqual(tile["terrain"], again["terrain"])
+        # Different coords can differ
+        other = self.state.get_tile_at(1, 1)
+        # (just ensure we get a valid tile; terrain may or may not match)
+
+    def test_validate_state_duplicate_location_rejected(self):
+        """Test that state validation fails when two agents share a location."""
+        self.state.add_agent(self.valid_agent, validate=False)
+        self.state.add_agent({**self.valid_agent, "id": 1, "name": "Other"}, validate=False)
+        is_valid, errors = self.state.validate_state()
+        self.assertFalse(is_valid)
+        self.assertTrue(any("share the same location" in e for e in errors))
+
+    def test_world_seed_serialization(self):
+        """Test that world_seed is stored and restored."""
+        self.state.world_seed = 42
+        self.state.add_agent(self.valid_agent, validate=False)
+        d = self.state.to_dict()
+        self.assertEqual(d["world_seed"], 42)
+        restored = ColonyState(d)
+        self.assertEqual(restored.world_seed, 42)
+        self.assertEqual(restored.get_tile_at(0, 0), self.state.get_tile_at(0, 0))

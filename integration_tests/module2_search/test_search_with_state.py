@@ -15,8 +15,8 @@ class TestSearchStateIntegration(unittest.TestCase):
     def test_planning_uses_agent_locations(self):
         """Test that task planning considers agent locations from state."""
         state = ColonyState()
-        state.add_agent({"id": 0, "location": (0, 0), "speed": 1.0})
-        state.add_agent({"id": 1, "location": (10, 10), "speed": 1.0})
+        state.add_agent({"id": 0, "name": "Agent 0", "location": (0, 0), "speed": 1.0}, validate=False)
+        state.add_agent({"id": 1, "name": "Agent 1", "location": (10, 10), "speed": 1.0}, validate=False)
         
         planner = TaskPlanner(state)
         tasks = [

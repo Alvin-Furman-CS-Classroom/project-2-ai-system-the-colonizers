@@ -16,8 +16,8 @@ class TestTaskPlanner(unittest.TestCase):
         """Set up test fixtures."""
         self.state = ColonyState()
         # Add some test agents
-        self.state.add_agent({"id": 0, "location": (0, 0)})
-        self.state.add_agent({"id": 1, "location": (5, 5)})
+        self.state.add_agent({"id": 0, "name": "Agent 0", "location": (0, 0)}, validate=False)
+        self.state.add_agent({"id": 1, "name": "Agent 1", "location": (5, 5)}, validate=False)
         self.planner = TaskPlanner(self.state)
     
     def test_plan_with_astar(self):

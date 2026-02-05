@@ -17,7 +17,7 @@ class TestRLStateIntegration(unittest.TestCase):
         state = ColonyState()
         state.resources["oxygen"] = 10.0
         state.resources["calories"] = 5.0
-        state.add_agent({"id": 0})
+        state.add_agent({"id": 0, "name": "Test Agent", "location": (0, 0)}, validate=False)
         
         assessor = SurvivalAssessor(use_rl=False)
         assessment = assessor.assess_survival(state)

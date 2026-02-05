@@ -18,20 +18,25 @@ def main():
     
     # Create initial state with some agents
     initial_state = ColonyState()
-    initial_state.add_agent({
+    success, errors = initial_state.add_agent({
         "id": 0,
         "name": "Agent Alpha",
         "oxygen": 80.0,
         "calories": 70.0,
         "location": (0, 0)
     })
-    initial_state.add_agent({
+    if not success:
+        print(f"Warning: Failed to add agent: {errors}")
+    
+    success, errors = initial_state.add_agent({
         "id": 1,
         "name": "Agent Beta",
         "oxygen": 90.0,
         "calories": 85.0,
         "location": (5, 5)
     })
+    if not success:
+        print(f"Warning: Failed to add agent: {errors}")
     
     # Initialize game engine
     game = GameEngine(initial_state)

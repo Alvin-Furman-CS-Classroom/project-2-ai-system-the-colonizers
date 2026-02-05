@@ -15,7 +15,7 @@ class TestLogicStateIntegration(unittest.TestCase):
     def test_rule_violation_updates_state(self):
         """Test that rule violations properly update state."""
         state = ColonyState()
-        state.add_agent({"id": 0, "oxygen": 0.0, "calories": 50.0})
+        state.add_agent({"id": 0, "name": "Test Agent", "location": (0, 0), "oxygen": 0.0, "calories": 50.0}, validate=False)
         initial_agent_count = len(state.agents)
         
         rule_engine = RuleEngine()

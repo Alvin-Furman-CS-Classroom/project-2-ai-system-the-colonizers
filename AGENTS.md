@@ -1,12 +1,21 @@
 ## Project Context
 
-- System title: [Your System Title]
-- Theme: [Your Theme]
+- System title: [Your System Title]The Colony Manager
+- Theme: Ai-Adversarial Surbival System
 - Proposal link or summary: [Your Proposal Link or Summary]
 
 **Module plan:**
 
-[Your Module Plan Table copied from README.md]
+
+| Module | Required Topic(s) | Topic Covered By | Checkpoint Due |
+| ------ | ----------------- | ---------------- | -------------- |
+| 1      | State Representation | Week 1 | Checkpoint 1 (Feb 11) |
+| 2      | Search (A*, IDA*, Beam Search) | Week 1.5-3 | Checkpoint 1-2 (Feb 11-26) |
+| 3      | Propositional Logic | Week 1-1.5 | Checkpoint 1-2 (Feb 11-26) |
+| 4      | Game Theory (Minimax, Alpha-Beta, MCTS) | Week 5.5-8.5 | Checkpoint 3 (March 19) |
+| 5      | Event Application Logic (state transitions) | After Module 4 | Checkpoint 3-4 (March 19 - April 2) |
+| 6      | Reinforcement Learning or Heuristics | Week 8.5-10 | Checkpoint 4-5 (April 2-16) |
+
 
 ## Constraints
 

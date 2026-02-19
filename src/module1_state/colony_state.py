@@ -77,6 +77,7 @@ class ColonyState:
         self.active_tasks: List[Dict[str, Any]] = state_data.get("active_tasks", [])
         self.turn_number: int = state_data.get("turn_number", 0)
         self.world_seed: int = state_data.get("world_seed", 0)
+        self.difficulty: str = state_data.get("difficulty", "normal")  # easy, normal, hard
     
     def _create_empty_state(self) -> Dict[str, Any]:
         """Create an empty/default colony state."""
@@ -90,7 +91,8 @@ class ColonyState:
             "infrastructure": {},
             "active_tasks": [],
             "turn_number": 0,
-            "world_seed": 0
+            "world_seed": 0,
+            "difficulty": "normal"
         }
     
     def to_dict(self) -> Dict[str, Any]:
@@ -106,7 +108,8 @@ class ColonyState:
             "infrastructure": self.infrastructure,
             "active_tasks": self.active_tasks,
             "turn_number": self.turn_number,
-            "world_seed": self.world_seed
+            "world_seed": self.world_seed,
+            "difficulty": self.difficulty
         }
     
     def to_json(self) -> str:
@@ -161,7 +164,7 @@ class ColonyState:
         Return procedurally generated tile data at world coordinates (x, y).
         No map bounds: any (x, y) is valid; same coordinates always yield the same tile.
         """
-        return get_tile(int(x), int(y), self.world_seed)
+        return get_tile(int(x), int(y), self.world_seed, self.difficulty)
     
     def consume_resources(self, consumption: Dict[str, float]) -> None:
         """

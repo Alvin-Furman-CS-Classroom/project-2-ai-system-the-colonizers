@@ -8,10 +8,12 @@ Player manages agents and tasks while resources degrade over time.
 import pygame
 import sys
 import math
+import random
 from typing import Dict, List, Tuple, Optional, Any
 from src.game_engine import GameEngine
 from src.module1_state.colony_state import ColonyState
 from src.module2_search.task_planner import Task
+from src.module1_state.procedural_tiles import clear_tile_cache
 
 # Constants
 TILE_SIZE = 32  # Size of each tile in pixels
@@ -144,13 +146,14 @@ class VisualGame:
         
         # Zoom level (1.0 = default, higher = zoomed in, lower = zoomed out)
         self.zoom_level = 1.0
-        self.zoom_min = 0.5
+        self.zoom_min = 0.2  # Allow more zoom out to see more of the map
         self.zoom_max = 2.0
         
         # Initialize game engine (will be created when starting new game)
         self.game: Optional[GameEngine] = None
         self.last_turn_time = pygame.time.get_ticks()
         self.turn_timer = self.turn_interval * 1000
+        self.last_decay_time = 0  # Track time for continuous decay (0 = not initialized yet)
         
         # Event notification system
         self.current_event_text = None
@@ -177,10 +180,13 @@ class VisualGame:
         # Menu navigation
         self.menu_selection = 0  # 0 = New Game, 1 = Options, 2 = Quit
         self.options_selection = 0  # 0 = Difficulty, 1 = Advanced, 2 = Controls, 3 = Back
-        self.advanced_selection = 0  # 0 = Algorithm, 1 = Turn Speed, 2 = Back
+        self.advanced_selection = 0  # 0 = Algorithm, 1 = Turn Speed, 2 = Decay Rate, 3 = Back
         self.difficulty_selection = 1  # 0 = Easy, 1 = Normal, 2 = Hard
         self.algorithm_selection = 0  # 0 = A*, 1 = IDA*, 2 = Beam Search
         self.starting_agents = 2  # 1-5, selected at new game setup
+        
+        # Decay rate multipliers (1.0 = default, higher = faster decay)
+        self.decay_multiplier = 1.0  # Multiplier for decay rates
         
         # Fullscreen mode
         self.fullscreen = False
@@ -197,7 +203,11 @@ class VisualGame:
     
     def _create_initial_game(self) -> GameEngine:
         """Create initial game state with agents and resource stations."""
-        initial_state = ColonyState()
+        # Clear tile cache to ensure fresh map generation
+        clear_tile_cache()
+        # Generate random seed for procedural map generation
+        random_seed = random.randint(0, 2**31 - 1)
+        initial_state = ColonyState({"world_seed": random_seed, "difficulty": self.difficulty})
         
         # Agent names for variety
         names = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
@@ -247,6 +257,7 @@ class VisualGame:
             self.turn_interval = 12.0  # Was 8.0
         
         self.turn_timer = self.turn_interval * 1000
+        self.last_decay_time = pygame.time.get_ticks()  # Initialize decay timer
         
         self.agent_paths.clear()
         self.agent_visual_pos.clear()
@@ -353,6 +364,8 @@ class VisualGame:
         state = self.game.get_state()
         for agent in state.agents:
             agent_id = agent.get("id")
+            status = agent.get("status", "active")
+            
             # Use interpolated position when agent is in transit
             if agent_id in self.agent_visual_pos:
                 vx, vy = self.agent_visual_pos[agent_id]
@@ -364,29 +377,37 @@ class VisualGame:
                 x, y = float(loc[0]), float(loc[1])
             screen_x, screen_y = self._world_to_screen(x, y)
             
-            # Determine color based on health
-            oxygen = agent.get("oxygen", 100.0)
-            integrity = agent.get("integrity", 100.0)
-            avg_health = (oxygen + integrity) / 2.0
-            
-            if avg_health < 30:
-                color = COLOR_AGENT_LOW_HEALTH
+            # Grey out dead agents
+            if status == "dead":
+                color = (100, 100, 100)  # Grey for dead agents
+                border_color = (60, 60, 60)  # Darker grey border
+                text_color = (150, 150, 150)  # Grey text
             else:
-                color = COLOR_AGENT
+                # Determine color based on health for living agents
+                oxygen = agent.get("oxygen", 100.0)
+                integrity = agent.get("integrity", 100.0)
+                avg_health = (oxygen + integrity) / 2.0
+                
+                if avg_health < 30:
+                    color = COLOR_AGENT_LOW_HEALTH
+                else:
+                    color = COLOR_AGENT
+                border_color = (0, 0, 0)  # Black border for living agents
+                text_color = COLOR_TEXT
             
             # Draw agent circle (scale with zoom)
             radius = max(4, int(self._get_scaled_tile_size() // 3))
             pygame.draw.circle(self.screen, color, (screen_x, screen_y), radius)
-            pygame.draw.circle(self.screen, (0, 0, 0), (screen_x, screen_y), radius, 2)
+            pygame.draw.circle(self.screen, border_color, (screen_x, screen_y), radius, 2)
             
             # Draw agent ID/name
             agent_id = agent.get("id", "?")
-            text = self.font_small.render(str(agent_id), True, COLOR_TEXT)
+            text = self.font_small.render(str(agent_id), True, text_color)
             text_rect = text.get_rect(center=(screen_x, screen_y))
             self.screen.blit(text, text_rect)
             
-            # Highlight selected agent
-            if self.selected_agent_id == agent.get("id"):
+            # Highlight selected agent (only if alive)
+            if self.selected_agent_id == agent.get("id") and status != "dead":
                 pygame.draw.circle(self.screen, (255, 255, 0), (screen_x, screen_y), radius + 4, 3)
     
     def _draw_drag_preview(self):
@@ -522,6 +543,7 @@ class VisualGame:
         # Display visible agents
         visible_agents = state.agents[self.agent_list_scroll:self.agent_list_scroll + agents_per_page]
         for agent in visible_agents:
+            agent_entry_start_y = y_offset  # Track where this agent entry starts
             agent_id = agent.get("id", "?")
             name = agent.get("name", "Unknown")
             oxygen = agent.get("oxygen", 0)
@@ -530,9 +552,22 @@ class VisualGame:
             status = agent.get("status", "active")
             loc = agent.get("location", (0, 0))
             
-            # Agent info line (grayed out if dead)
+            # Highlight selected agent with background
+            is_selected = (self.selected_agent_id == agent_id and status != "dead")
+            if is_selected:
+                # Draw highlight background for selected agent (entire entry)
+                highlight_rect = pygame.Rect(sidebar_x + 5, agent_entry_start_y - 5, self.sidebar_width - 10, 85)
+                pygame.draw.rect(self.screen, (60, 80, 100), highlight_rect)  # Dark blue highlight
+                pygame.draw.rect(self.screen, (255, 255, 0), highlight_rect, 2)  # Yellow border
+            
+            # Agent info line (grayed out if dead, brighter if selected)
             agent_text = f"{agent_id}: {name} ({status})"
-            text_color = (150, 150, 150) if status == "dead" else COLOR_TEXT
+            if status == "dead":
+                text_color = (150, 150, 150)
+            elif is_selected:
+                text_color = (255, 255, 200)  # Bright yellow-white for selected
+            else:
+                text_color = COLOR_TEXT
             text_surface = self.font_small.render(agent_text, True, text_color)
             self.screen.blit(text_surface, (sidebar_x + 10, y_offset))
             y_offset += 20
@@ -550,7 +585,8 @@ class VisualGame:
             
             # Location
             loc_text = f"  Loc: {loc[0]}, {loc[1]}"
-            text_surface = self.font_small.render(loc_text, True, COLOR_TEXT)
+            loc_color = (255, 255, 200) if is_selected else COLOR_TEXT
+            text_surface = self.font_small.render(loc_text, True, loc_color)
             self.screen.blit(text_surface, (sidebar_x + 10, y_offset))
             y_offset += 25
         
@@ -676,9 +712,13 @@ class VisualGame:
         """Draw the procedural tile map (finite world with bounds)."""
         state = self.game.get_state()
         
-        # Calculate visible tile range
-        tiles_x = CAMERA_WIDTH // TILE_SIZE + 4
-        tiles_y = CAMERA_HEIGHT // TILE_SIZE + 4
+        # Calculate visible tile range based on zoom level
+        # When zoomed out, tiles are smaller, so we need to draw more tiles to fill the screen
+        scaled_tile_size = self._get_scaled_tile_size()
+        
+        # Calculate how many tiles fit on screen (with padding for edge tiles)
+        tiles_x = int(self.camera_width / scaled_tile_size) + 4
+        tiles_y = int(self.camera_height / scaled_tile_size) + 4
         
         # Convert camera position to integers for range()
         camera_x_int = int(self.camera_x)
@@ -892,10 +932,13 @@ class VisualGame:
         self._show_event("Agent recruited!")
     
     def _find_empty_spawn_tile(self) -> Optional[Tuple[int, int]]:
-        """Find a passable tile not occupied by agent or station."""
+        """Find a passable tile not occupied by agent or station (for initial spawn only - agents can move through each other)."""
         state = self.game.get_state()
         occupied = set()
+        # Only check living agents for spawn placement (dead agents don't block)
         for a in state.agents:
+            if a.get("status") == "dead":
+                continue
             loc = a.get("location")
             if loc and len(loc) == 2:
                 occupied.add((int(loc[0]), int(loc[1])))
@@ -995,44 +1038,73 @@ class VisualGame:
             cur_x, cur_y = float(current_loc[0]), float(current_loc[1])
             # Use visual pos if we're mid-step, else current location
             vx, vy = self.agent_visual_pos.get(agent_id, (cur_x, cur_y))
-            # Skip path points we've already reached
-            while path and (path[0][0], path[0][1]) == (int(round(vx)), int(round(vy))):
-                reached = path.pop(0)
-                vx, vy = float(reached[0]), float(reached[1])
-                state.update_agent(agent_index, {"location": (int(vx), int(vy))}, validate=False)
-                if not path:
-                    to_remove.append(agent_id)
-                    self.agent_visual_pos.pop(agent_id, None)
+            
+            # Skip path points we've already reached (use distance check for smoother diagonal movement)
+            while path:
+                tx, ty = float(path[0][0]), float(path[0][1])
+                dx_check = tx - vx
+                dy_check = ty - vy
+                dist_to_next = math.sqrt(dx_check * dx_check + dy_check * dy_check)
+                
+                # If we're very close to the next waypoint (within 0.1 tiles), consider it reached
+                if dist_to_next < 0.1:
+                    reached = path.pop(0)
+                    vx, vy = float(reached[0]), float(reached[1])
+                    state.update_agent(agent_index, {"location": (int(round(vx)), int(round(vy)))}, validate=False)
+                    if not path:
+                        to_remove.append(agent_id)
+                        self.agent_visual_pos.pop(agent_id, None)
+                        break
+                else:
                     break
+            
             if not path:
                 continue
-            # Move toward path[0]
+            
+            # Move toward path[0] with smooth interpolation
             tx, ty = float(path[0][0]), float(path[0][1])
-            tile = state.get_tile_at(int(tx), int(ty))
+            tile = state.get_tile_at(int(round(tx)), int(round(ty)))
             if not tile.get("passable", True):
-                # Skip impassable terrain (water)
                 path.pop(0)
                 if not path:
                     to_remove.append(agent_id)
                     self.agent_visual_pos.pop(agent_id, None)
                 continue
+            
+            # Water slows movement (0.2x), other terrain normal speed
+            tile_speed = tile.get("move_speed", 1.0)
+            step_move_dist = move_dist * tile_speed
+            
+            # Calculate direction vector (normalized for smooth diagonal movement)
             dx, dy = tx - vx, ty - vy
-            dist = (dx * dx + dy * dy) ** 0.5
-            if dist <= 0.001:
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            if dist <= 0.05:  # Very close, snap to target
                 path.pop(0)
-                state.update_agent(agent_index, {"location": (int(tx), int(ty))}, validate=False)
-                self.agent_visual_pos[agent_id] = (tx, ty)
+                vx, vy = tx, ty
+                state.update_agent(agent_index, {"location": (int(round(tx)), int(round(ty)))}, validate=False)
+                self.agent_visual_pos[agent_id] = (vx, vy)
                 if not path:
                     to_remove.append(agent_id)
                     self.agent_visual_pos.pop(agent_id, None)
             else:
-                step = min(move_dist, dist)
-                vx += dx * (step / dist)
-                vy += dy * (step / dist)
+                # Smooth movement: move along direction vector
+                step = min(step_move_dist, dist)
+                # Normalize direction for smooth diagonal movement
+                if dist > 0:
+                    vx += (dx / dist) * step
+                    vy += (dy / dist) * step
                 self.agent_visual_pos[agent_id] = (vx, vy)
-                if step >= dist - 0.001:
+                
+                # Check if we've reached the waypoint
+                new_dx = tx - vx
+                new_dy = ty - vy
+                new_dist = math.sqrt(new_dx * new_dx + new_dy * new_dy)
+                if new_dist < 0.1 or step >= dist - 0.05:
                     path.pop(0)
-                    state.update_agent(agent_index, {"location": (int(tx), int(ty))}, validate=False)
+                    vx, vy = tx, ty
+                    state.update_agent(agent_index, {"location": (int(round(tx)), int(round(ty)))}, validate=False)
+                    self.agent_visual_pos[agent_id] = (vx, vy)
                     if not path:
                         to_remove.append(agent_id)
                         self.agent_visual_pos.pop(agent_id, None)
@@ -1077,21 +1149,27 @@ class VisualGame:
                     self.agent_visual_pos.pop(agent_id)
                 self._show_event(f"Agent {agent.get('name', agent_id)} died!")
     
-    def _apply_natural_decay(self):
+    def _apply_natural_decay(self, dt_sec: float):
         """
-        Apply natural resource decay to all agent resources each turn.
-        Creates pressure to visit resource stations regularly.
+        Apply continuous natural resource decay to all agent resources based on elapsed time.
+        Creates smooth, continuous pressure to visit resource stations regularly.
+        
+        Args:
+            dt_sec: Time elapsed since last update in seconds
         """
-        if not self.game:
+        if not self.game or dt_sec <= 0:
             return
         state = self.game.get_state()
-        # Decay rates per turn - harsh pressure to visit stations regularly
-        # With 12s turn interval, agents lose significant resources each turn
-        # Agents need to visit stations every ~15-20 turns (3-4 minutes) or die
-        decay_rates = {
-            "oxygen": 4.0,      # Oxygen depletes fastest (harsh)
-            "calories": 3.0,    # Calories decay quickly
-            "integrity": 2.0,   # Integrity decays moderately
+        # Decay rates per second - continuous smooth decay (multiplied by decay_multiplier)
+        # At default 12s turn interval with multiplier 1.0, this matches previous per-turn rates:
+        # oxygen: 4.0/12 = 0.333/sec, calories: 3.0/12 = 0.25/sec, integrity: 2.0/12 = 0.167/sec
+        base_decay_rates_per_second = {
+            "oxygen": 0.333,      # Oxygen depletes fastest (harsh)
+            "calories": 0.25,     # Calories decay quickly
+            "integrity": 0.167,   # Integrity decays moderately
+        }
+        decay_rates_per_second = {
+            k: v * self.decay_multiplier for k, v in base_decay_rates_per_second.items()
         }
         for i, agent in enumerate(state.agents):
             if agent.get("status") == "dead":
@@ -1100,9 +1178,9 @@ class VisualGame:
             current_calories = agent.get("calories", 100.0)
             current_integrity = agent.get("integrity", 100.0)
             updates = {
-                "oxygen": max(0.0, current_oxygen - decay_rates["oxygen"]),
-                "calories": max(0.0, current_calories - decay_rates["calories"]),
-                "integrity": max(0.0, current_integrity - decay_rates["integrity"]),
+                "oxygen": max(0.0, current_oxygen - decay_rates_per_second["oxygen"] * dt_sec),
+                "calories": max(0.0, current_calories - decay_rates_per_second["calories"] * dt_sec),
+                "integrity": max(0.0, current_integrity - decay_rates_per_second["integrity"] * dt_sec),
             }
             state.update_agent(i, updates, validate=False)
     
@@ -1113,15 +1191,23 @@ class VisualGame:
         
         current_time = pygame.time.get_ticks()
         
-        # Check if it's time for next turn (resource drain, adversarial, etc.)
+        # Apply continuous resource decay every frame (smooth, not chunked)
+        if self.last_decay_time > 0:
+            dt_ms = current_time - self.last_decay_time
+            dt_sec = dt_ms / 1000.0
+            # Cap dt_sec to prevent large spikes (e.g., if game was paused)
+            if dt_sec > 0 and dt_sec < 1.0:  # Max 1 second per frame
+                self._apply_natural_decay(dt_sec)
+                # Check for deaths after decay
+                self._check_agent_deaths()
+        self.last_decay_time = current_time
+        
+        # Check if it's time for next turn (adversarial events, task planning, etc.)
         if current_time - self.last_turn_time >= self.turn_timer:
             self.last_turn_time = current_time
             
             # Check for agent deaths before turn
             self._check_agent_deaths()
-            
-            # Apply natural resource decay
-            self._apply_natural_decay()
             
             # Execute turn with pending tasks (no agent movement here - that's smooth/frame-based)
             player_tasks = self.pending_tasks.copy()
@@ -1234,9 +1320,13 @@ class VisualGame:
         # Turn speed
         speed_text = f"Turn Speed: {self.turn_interval:.1f}s"
         
+        # Decay rate
+        decay_text = f"Decay Rate: {self.decay_multiplier:.2f}x"
+        
         options_list = [
             algo_text,
             speed_text,
+            decay_text,
             "Back"
         ]
         y_start = 250
@@ -1256,9 +1346,11 @@ class VisualGame:
             text_rect = text.get_rect(center=(WINDOW_WIDTH // 2, y + 15))
             self.screen.blit(text, text_rect)
         
-        # Show algorithm options when selected
+        # Show algorithm options when selected (position below buttons to avoid overlap)
         if self.advanced_selection == 0:
-            algo_y = y_start + 80
+            # Position algorithm options after all buttons (button 2 ends at y_start + 2*60 + 40 = 370)
+            # Place options at 380+ to ensure no overlap
+            algo_y = y_start + len(options_list) * 60 + 20  # After all buttons with spacing
             for i, algo in enumerate(algo_options):
                 x = WINDOW_WIDTH // 2 - 100 + i * 70
                 algo_color = COLOR_BUTTON_SELECTED if algo.lower().replace("*", "star").replace(" ", "_") == self.algorithm else COLOR_BUTTON
@@ -1268,6 +1360,22 @@ class VisualGame:
                 algo_text_small = self.font_small.render(algo, True, COLOR_TEXT)
                 algo_text_rect = algo_text_small.get_rect(center=(x, algo_y + 5))
                 self.screen.blit(algo_text_small, algo_text_rect)
+        
+        # Show turn speed adjustment when selected
+        if self.advanced_selection == 1:
+            # Position speed controls after all buttons to avoid overlap
+            speed_y = y_start + len(options_list) * 60 + 20  # After all buttons with spacing
+            speed_text = self.font_small.render("- = harder (faster)  + = easier (slower)  Min: 1s", True, COLOR_TEXT)
+            speed_text_rect = speed_text.get_rect(center=(WINDOW_WIDTH // 2, speed_y))
+            self.screen.blit(speed_text, speed_text_rect)
+        
+        # Show decay rate adjustment when selected
+        if self.advanced_selection == 2:
+            # Position decay controls after all buttons to avoid overlap
+            decay_y = y_start + len(options_list) * 60 + 20  # After all buttons with spacing
+            decay_text = self.font_small.render("- = faster decay (harder)  + = slower decay (easier)  Range: 0.1x-3.0x", True, COLOR_TEXT)
+            decay_text_rect = decay_text.get_rect(center=(WINDOW_WIDTH // 2, decay_y))
+            self.screen.blit(decay_text, decay_text_rect)
     
     def _draw_controls(self):
         """Draw controls help screen."""
@@ -1327,7 +1435,8 @@ class VisualGame:
         return True
     
     def _draw_resource_stations(self):
-        """Draw resource stations on the map."""
+        """Draw resource stations on the map. Always visible regardless of zoom."""
+        ts = int(self._get_scaled_tile_size())
         for station in self.resource_stations:
             tiles = station.get_tiles()
             if not tiles:
@@ -1341,21 +1450,20 @@ class VisualGame:
             else:
                 color = COLOR_STATION_INTEGRITY
             
-            # Draw station tiles
-            ts = int(self._get_scaled_tile_size())
+            # Draw station tiles (completely cover terrain underneath)
             for x, y in tiles:
                 if WORLD_MIN_X <= x < WORLD_MAX_X and WORLD_MIN_Y <= y < WORLD_MAX_Y:
                     screen_x, screen_y = self._world_to_screen(x, y)
-                    if -ts <= screen_x <= CAMERA_WIDTH + ts and -ts <= screen_y <= CAMERA_HEIGHT + ts:
-                        # Draw building tile
+                    if -ts <= screen_x <= self.camera_width + ts and -ts <= screen_y <= self.camera_height + ts:
                         rect = pygame.Rect(screen_x - ts // 2, screen_y - ts // 2, ts, ts)
+                        # Draw solid filled rectangle to completely cover terrain
                         pygame.draw.rect(self.screen, color, rect)
                         pygame.draw.rect(self.screen, (0, 0, 0), rect, 2)
             
-            # Draw station center marker
+            # Draw station center marker (generous visibility check for zoom)
             center_screen_x, center_screen_y = self._world_to_screen(station.center_x, station.center_y)
-            if 0 <= center_screen_x <= CAMERA_WIDTH and 0 <= center_screen_y <= CAMERA_HEIGHT:
-                # Draw icon based on type
+            margin = ts * 2  # Ensure icon visible when station tiles are on screen
+            if -margin <= center_screen_x <= self.camera_width + margin and -margin <= center_screen_y <= self.camera_height + margin:
                 icon_text = "O" if station.station_type == STATION_OXYGEN else ("C" if station.station_type == STATION_CALORIES else "R")
                 icon = self.font.render(icon_text, True, (255, 255, 255))
                 icon_rect = icon.get_rect(center=(center_screen_x, center_screen_y))
@@ -1533,39 +1641,69 @@ class VisualGame:
                                 algorithms = ["astar", "idastar", "beam_search"]
                                 self.algorithm_selection = (self.algorithm_selection + 1) % 3
                                 self.algorithm = algorithms[self.algorithm_selection]
-                            elif i == 1:  # Turn speed
-                                self.turn_interval = min(15.0, self.turn_interval + 1.0)
+                            elif i == 1:  # Turn speed - click to cycle harder (LEFT half) or easier (RIGHT half)
+                                mouse_x = mouse_pos[0]
+                                if mouse_x < WINDOW_WIDTH // 2:
+                                    # Left half: harder (lower interval, faster turns)
+                                    self.turn_interval = max(1.0, self.turn_interval - 1.0)
+                                else:
+                                    # Right half: easier (higher interval, slower turns)
+                                    self.turn_interval = min(15.0, self.turn_interval + 1.0)
                                 self.turn_timer = self.turn_interval * 1000
-                            elif i == 2:  # Back
+                            elif i == 2:  # Decay rate - click to adjust
+                                mouse_x = mouse_pos[0]
+                                if mouse_x < WINDOW_WIDTH // 2:
+                                    # Left half: faster decay (harder)
+                                    self.decay_multiplier = max(0.1, self.decay_multiplier - 0.2)
+                                else:
+                                    # Right half: slower decay (easier)
+                                    self.decay_multiplier = min(3.0, self.decay_multiplier + 0.2)
+                            elif i == 3:  # Back
                                 self.game_state = STATE_OPTIONS
                             break
             
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_UP:
-                    self.advanced_selection = (self.advanced_selection - 1) % 3
+                    self.advanced_selection = (self.advanced_selection - 1) % 4
                 elif event.key == pygame.K_DOWN:
-                    self.advanced_selection = (self.advanced_selection + 1) % 3
+                    self.advanced_selection = (self.advanced_selection + 1) % 4
                 elif event.key == pygame.K_LEFT:
                     if self.advanced_selection == 0:  # Algorithm
                         algorithms = ["astar", "idastar", "beam_search"]
                         self.algorithm_selection = (self.algorithm_selection - 1) % 3
                         self.algorithm = algorithms[self.algorithm_selection]
-                    elif self.advanced_selection == 1:  # Turn speed
-                        self.turn_interval = max(3.0, self.turn_interval - 1.0)
+                    elif self.advanced_selection == 1:  # Turn speed - harder (faster turns)
+                        self.turn_interval = max(1.0, self.turn_interval - 1.0)
                         self.turn_timer = self.turn_interval * 1000
+                    elif self.advanced_selection == 2:  # Decay rate - faster decay (harder)
+                        self.decay_multiplier = max(0.1, self.decay_multiplier - 0.2)
                 elif event.key == pygame.K_RIGHT:
                     if self.advanced_selection == 0:  # Algorithm
                         algorithms = ["astar", "idastar", "beam_search"]
                         self.algorithm_selection = (self.algorithm_selection + 1) % 3
                         self.algorithm = algorithms[self.algorithm_selection]
-                    elif self.advanced_selection == 1:  # Turn speed
+                    elif self.advanced_selection == 1:  # Turn speed - easier (slower turns)
                         self.turn_interval = min(15.0, self.turn_interval + 1.0)
                         self.turn_timer = self.turn_interval * 1000
+                    elif self.advanced_selection == 2:  # Decay rate - slower decay (easier)
+                        self.decay_multiplier = min(3.0, self.decay_multiplier + 0.2)
                 elif event.key == pygame.K_RETURN or event.key == pygame.K_SPACE:
-                    if self.advanced_selection == 2:  # Back
+                    if self.advanced_selection == 3:  # Back
                         self.game_state = STATE_OPTIONS
                 elif event.key == pygame.K_ESCAPE:
                     self.game_state = STATE_OPTIONS
+                elif event.key in (pygame.K_MINUS, pygame.K_EQUALS, pygame.K_PLUS):
+                    if self.advanced_selection == 1:  # Turn speed adjustment
+                        if event.key == pygame.K_MINUS:
+                            self.turn_interval = max(1.0, self.turn_interval - 0.5)  # Harder
+                        else:  # K_EQUALS or K_PLUS
+                            self.turn_interval = min(15.0, self.turn_interval + 0.5)  # Easier
+                        self.turn_timer = self.turn_interval * 1000
+                    elif self.advanced_selection == 2:  # Decay rate adjustment
+                        if event.key == pygame.K_MINUS:
+                            self.decay_multiplier = max(0.1, self.decay_multiplier - 0.1)  # Faster decay
+                        else:  # K_EQUALS or K_PLUS
+                            self.decay_multiplier = min(3.0, self.decay_multiplier + 0.1)  # Slower decay
         
         return True
     

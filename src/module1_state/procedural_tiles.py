@@ -1,11 +1,11 @@
 """
-Procedurally generated tiles with circle-based biome generation.
+Procedurally generated tiles with blob-based lake generation.
 
-Uses radial distance from biome centers to create circular, organic-looking biomes
-instead of rectangular chunks. Neighbors influence tile type for smooth transitions.
+Creates organic blob-like lakes with sandy beaches around them, and grass everywhere else.
+Lakes are generated as irregular blobs with smooth edges.
 """
 
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import math
 
 # Terrain types
@@ -20,14 +20,17 @@ TERRAIN_TYPES = [TERRAIN_GRASS, TERRAIN_WATER, TERRAIN_ROCK, TERRAIN_SAND, TERRA
 # Cache for generated tiles
 _tile_cache: Dict[Tuple[int, int, int], str] = {}
 
+# Cache for lake blob centers (generated once per seed)
+_lake_blobs_cache: Dict[int, List[Tuple[int, int, float]]] = {}  # seed -> [(x, y, radius), ...]
+
+def clear_tile_cache():
+    """Clear the tile cache (useful when generating a new map with a different seed)."""
+    global _tile_cache, _lake_blobs_cache
+    _tile_cache.clear()
+    _lake_blobs_cache.clear()
+
 # Neighbor directions (8-connected for smoother transitions)
 _NEIGHBORS = [(0, 1), (1, 0), (0, -1), (-1, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)]
-
-# Neighbor influence: how much neighbors affect tile type
-_NEIGHBOR_INFLUENCE = 0.80
-
-# Base randomness: chance of ignoring neighbors
-_BASE_RANDOMNESS = 0.10
 
 
 def _pseudo_random(x: int, y: int, seed: int, step: int = 0) -> float:
@@ -36,50 +39,109 @@ def _pseudo_random(x: int, y: int, seed: int, step: int = 0) -> float:
     return (h % 10000) / 10000.0
 
 
-def _get_biome_center(x: int, y: int, seed: int) -> Tuple[int, int]:
-    """Get the biome center for a given coordinate using circular regions."""
-    # Use larger regions for circular biomes
-    region_size = 8
-    region_x = x // region_size
-    region_y = y // region_size
-    # Biome center is offset within region based on seed
-    offset_x = int(_pseudo_random(region_x, region_y, seed, 0) * region_size * 0.6)
-    offset_y = int(_pseudo_random(region_x, region_y, seed, 1) * region_size * 0.6)
-    center_x = region_x * region_size + region_size // 2 + offset_x - region_size // 2
-    center_y = region_y * region_size + region_size // 2 + offset_y - region_size // 2
-    return (center_x, center_y)
-
-
-def _get_base_terrain(x: int, y: int, seed: int) -> str:
-    """Get base terrain type based on distance from biome center (circular)."""
-    center_x, center_y = _get_biome_center(x, y, seed)
-    dist = math.hypot(x - center_x, y - center_y)
+def _generate_lake_blobs(seed: int, difficulty: str) -> List[Tuple[int, int, float]]:
+    """
+    Generate lake blob centers and sizes based on seed and difficulty.
+    Returns list of (center_x, center_y, radius) tuples.
+    """
+    if seed in _lake_blobs_cache:
+        return _lake_blobs_cache[seed]
     
-    # Use distance and angle to determine terrain
-    angle = math.atan2(y - center_y, x - center_x) if dist > 0 else 0
-    # Combine distance and angle for variety
-    h = hash((seed, int(dist // 2), int(angle * 10))) & 0x7FFFFFFF
-    terrain_index = h % len(TERRAIN_TYPES)
-    return TERRAIN_TYPES[terrain_index]
+    # Number of lakes based on difficulty (more lakes = more water)
+    lake_counts = {
+        "easy": 3,    # Fewer, smaller lakes
+        "normal": 5,  # Moderate lakes
+        "hard": 8     # More, larger lakes
+    }
+    num_lakes = lake_counts.get(difficulty, 5)
+    
+    # Lake size ranges (radius in tiles)
+    size_ranges = {
+        "easy": (3.0, 6.0),      # Smaller lakes
+        "normal": (4.0, 8.0),   # Medium lakes
+        "hard": (5.0, 10.0)     # Larger lakes
+    }
+    min_radius, max_radius = size_ranges.get(difficulty, (4.0, 8.0))
+    
+    blobs: List[Tuple[int, int, float]] = []
+    world_size = 50  # WORLD_WIDTH/HEIGHT
+    
+    for i in range(num_lakes):
+        # Generate random blob center
+        center_x = int(_pseudo_random(seed, i, 0) * world_size - world_size // 2)
+        center_y = int(_pseudo_random(seed, i, 1) * world_size - world_size // 2)
+        
+        # Generate random radius with some variation
+        base_radius = min_radius + _pseudo_random(seed, i, 2) * (max_radius - min_radius)
+        # Add some irregularity to radius for organic shape
+        radius_variation = 0.7 + _pseudo_random(seed, i, 3) * 0.6  # 0.7 to 1.3 multiplier
+        radius = base_radius * radius_variation
+        
+        blobs.append((center_x, center_y, radius))
+    
+    _lake_blobs_cache[seed] = blobs
+    return blobs
 
 
-def get_tile(x: int, y: int, seed: int = 0) -> Dict[str, Any]:
+def _distance_to_blob(x: int, y: int, blob: Tuple[int, int, float]) -> float:
+    """Calculate distance from point to blob edge (negative if inside blob)."""
+    center_x, center_y, radius = blob
+    dist = math.hypot(x - center_x, y - center_y)
+    return dist - radius  # Negative if inside blob, positive if outside
+
+
+def _get_base_terrain(x: int, y: int, seed: int, difficulty: str) -> str:
+    """
+    Get base terrain type: water (inside blobs), sand (beach around blobs), grass (everywhere else).
+    """
+    blobs = _generate_lake_blobs(seed, difficulty)
+    
+    # Find minimum distance to any blob edge
+    min_dist_to_edge = float('inf')
+    nearest_blob = None
+    
+    for blob in blobs:
+        dist_to_edge = _distance_to_blob(x, y, blob)
+        if abs(dist_to_edge) < abs(min_dist_to_edge):
+            min_dist_to_edge = dist_to_edge
+            nearest_blob = blob
+    
+    # Determine terrain based on distance to blob edge
+    if min_dist_to_edge < 0:
+        # Inside blob = water
+        return TERRAIN_WATER
+    elif min_dist_to_edge < 2.0:
+        # Within 2 tiles of blob edge = sand (beach)
+        # Add some variation so beaches aren't perfectly uniform
+        beach_variation = _pseudo_random(x, y, seed, 20)
+        if beach_variation < 0.85:  # 85% chance of sand, 15% chance of grass (for natural look)
+            return TERRAIN_SAND
+        else:
+            return TERRAIN_GRASS
+    else:
+        # Far from blobs = grass
+        return TERRAIN_GRASS
+
+
+def get_tile(x: int, y: int, seed: int = 0, difficulty: str = "normal") -> Dict[str, Any]:
     """
     Return procedural tile data for world coordinates (x, y).
     
-    Uses circle-based biome generation: tiles are assigned based on distance from
-    biome centers, creating circular, organic biomes. Neighbors influence final
-    type for smooth transitions.
+    Uses blob-based lake generation: creates organic blob-like lakes with sandy beaches
+    around them, and grass everywhere else. Lakes are irregular shapes with smooth edges.
 
     Args:
         x: World x coordinate (any integer).
         y: World y coordinate (any integer).
         seed: World seed for variety (default 0).
+        difficulty: Game difficulty affecting number and size of lakes - "easy" (fewer/smaller),
+                   "normal" (moderate), "hard" (more/larger).
 
     Returns:
         Dictionary with:
         - "terrain": str — one of "grass", "water", "rock", "sand", "dirt"
-        - "passable": bool — whether agents can occupy this tile (water is not passable)
+        - "passable": bool — whether agents can occupy this tile (all passable)
+        - "move_speed": float — movement speed multiplier (water is slower)
     """
     ix, iy = int(x), int(y)
     cache_key = (ix, iy, seed)
@@ -88,10 +150,10 @@ def get_tile(x: int, y: int, seed: int = 0) -> Dict[str, Any]:
     if cache_key in _tile_cache:
         terrain = _tile_cache[cache_key]
     else:
-        # Get base terrain from circular biome
-        base_terrain = _get_base_terrain(ix, iy, seed)
+        # Get base terrain from blob-based generation
+        base_terrain = _get_base_terrain(ix, iy, seed, difficulty)
         
-        # Check neighbors for smoothing
+        # Smooth transitions using neighbors (especially for beach edges)
         neighbor_counts: Dict[str, int] = {}
         for dx, dy in _NEIGHBORS:
             nx, ny = ix + dx, iy + dy
@@ -100,17 +162,22 @@ def get_tile(x: int, y: int, seed: int = 0) -> Dict[str, Any]:
                 neighbor_terrain = _tile_cache[neighbor_key]
                 neighbor_counts[neighbor_terrain] = neighbor_counts.get(neighbor_terrain, 0) + 1
         
-        # Determine final terrain: blend base terrain with neighbors
-        rand_val = _pseudo_random(ix, iy, seed, 0)
-        if neighbor_counts and rand_val > _BASE_RANDOMNESS:
+        # Smooth beach edges: if surrounded by water, become water; if surrounded by grass, become grass
+        if base_terrain == TERRAIN_SAND and neighbor_counts:
+            water_count = neighbor_counts.get(TERRAIN_WATER, 0)
+            grass_count = neighbor_counts.get(TERRAIN_GRASS, 0)
             total_neighbors = sum(neighbor_counts.values())
-            if total_neighbors > 0:
-                most_common = max(neighbor_counts.items(), key=lambda x: x[1])[0]
-                # High chance to match neighbors, but also consider base terrain
-                if _pseudo_random(ix, iy, seed, 2) < _NEIGHBOR_INFLUENCE:
-                    terrain = most_common
+            
+            if total_neighbors >= 5:  # Most neighbors are known
+                if water_count >= 4:
+                    # Mostly water neighbors = inside lake edge, become water
+                    terrain = TERRAIN_WATER
+                elif grass_count >= 4:
+                    # Mostly grass neighbors = outside beach, become grass
+                    terrain = TERRAIN_GRASS
                 else:
-                    terrain = base_terrain
+                    # Mixed = stay sand (beach)
+                    terrain = TERRAIN_SAND
             else:
                 terrain = base_terrain
         else:
@@ -119,10 +186,13 @@ def get_tile(x: int, y: int, seed: int = 0) -> Dict[str, Any]:
         # Cache the result
         _tile_cache[cache_key] = terrain
     
-    passable = terrain != TERRAIN_WATER
+    passable = True  # All tiles passable
+    # Water is passable but slow (0.2x speed); other terrain normal speed
+    move_speed = 0.2 if terrain == TERRAIN_WATER else 1.0
     return {
         "terrain": terrain,
         "passable": passable,
+        "move_speed": move_speed,
     }
 
 

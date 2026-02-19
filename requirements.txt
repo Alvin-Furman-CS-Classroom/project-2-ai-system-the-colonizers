@@ -16,3 +16,6 @@
 
 # For JSON schema validation (optional)
 # jsonschema>=4.0.0
+
+# For visual game interface
+pygame>=2.5.0

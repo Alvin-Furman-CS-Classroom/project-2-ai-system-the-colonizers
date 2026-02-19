@@ -89,7 +89,8 @@ class ColonyState:
             },
             "infrastructure": {},
             "active_tasks": [],
-            "turn_number": 0
+            "turn_number": 0,
+            "world_seed": 0
         }
     
     def to_dict(self) -> Dict[str, Any]:

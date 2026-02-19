@@ -781,21 +781,3 @@ class TaskPlanner:
                     agent_positions[best_agent_id] = task_node
 
         return assignments
-    
-    def _calculate_path_cost(self, task1: Task, task2: Task) -> float:
-        """
-        Calculate cost of moving from one task to another (deprecated - use pathfinding).
-        
-        Kept for backward compatibility. Uses Euclidean distance as fallback.
-        
-        Args:
-            task1: Source task
-            task2: Destination task
-            
-        Returns:
-            Cost (Euclidean distance)
-        """
-        return math.hypot(
-            task2.location[0] - task1.location[0],
-            task2.location[1] - task1.location[1],
-        )

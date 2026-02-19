@@ -131,13 +131,6 @@ class TestTaskPlanner(unittest.TestCase):
         node = self.planner.get_task_location_node(task)
         self.assertIsNotNone(node)
     
-    def test_calculate_path_cost_deprecated(self):
-        """Test deprecated path cost calculation (backward compatibility)."""
-        task1 = Task("t1", (0, 0), {}, 1, 1)
-        task2 = Task("t2", (3, 4), {}, 1, 1)
-        cost = self.planner._calculate_path_cost(task1, task2)
-        self.assertAlmostEqual(cost, 5.0, places=1)  # Distance = 5
-    
     def test_empty_tasks(self):
         """Test planning with empty task list."""
         assignments = self.planner.plan_with_astar([])

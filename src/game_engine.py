@@ -340,12 +340,17 @@ class GameEngine:
     
     def is_game_over(self) -> bool:
         """
-        Check if game is over (all agents dead or colony destroyed).
+        Check if game is over (no agents, all agents dead, or colony destroyed).
         
         Returns:
             True if game should end
         """
         if len(self.state.agents) == 0:
+            return True
+        
+        # All agents dead (no living agents left)
+        living = [a for a in self.state.agents if a.get("status") != "dead"]
+        if not living:
             return True
         
         if self.state.resources.get("integrity", 100.0) <= 0:

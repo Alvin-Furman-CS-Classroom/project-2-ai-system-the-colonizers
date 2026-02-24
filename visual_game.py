@@ -63,6 +63,12 @@ STATION_OXYGEN = "oxygen_station"
 STATION_CALORIES = "calories_station"
 STATION_INTEGRITY = "integrity_station"
 
+# Powerup types (auto-walk to resource station when that resource drops below 20%)
+POWERUP_AUTO_OXYGEN = "auto_oxygen"
+POWERUP_AUTO_CALORIES = "auto_calories"
+POWERUP_AUTO_INTEGRITY = "auto_integrity"
+AUTO_WALK_THRESHOLD = 20.0  # Percent below which agent auto-walks to station
+
 # Game States
 STATE_MENU = "menu"
 STATE_SETUP = "setup"  # New game: select starting agents
@@ -70,6 +76,8 @@ STATE_OPTIONS = "options"
 STATE_ADVANCED = "advanced"
 STATE_CONTROLS = "controls"  # Controls help screen
 STATE_PLAYING = "playing"
+STATE_CONFIRM_QUIT = "confirm_quit"
+STATE_GAME_OVER = "game_over"
 
 
 class ResourceStation:
@@ -100,6 +108,24 @@ class ResourceStation:
         elif self.station_type == STATION_INTEGRITY:
             return "integrity"
         return "oxygen"
+
+
+def _station_tiles(center_x: int, center_y: int, size: int) -> List[Tuple[int, int]]:
+    """Return list of (x, y) tiles occupied by a station with given center and size."""
+    offset = size // 2
+    tiles = []
+    for x in range(center_x - offset, center_x + offset + 1):
+        for y in range(center_y - offset, center_y + offset + 1):
+            tiles.append((x, y))
+    return tiles
+
+
+class Powerup:
+    """A pickup that grants an agent an auto-walk ability (e.g. auto-go to oxygen when O2 < 20%)."""
+    def __init__(self, x: int, y: int, powerup_type: str):
+        self.x = x
+        self.y = y
+        self.powerup_type = powerup_type  # POWERUP_AUTO_OXYGEN, etc.
 
 
 class VisualGame:
@@ -200,6 +226,135 @@ class VisualGame:
         
         # Agent list scrolling
         self.agent_list_scroll = 0  # Scroll offset for agent list in sidebar
+        
+        # Stage index (0 = first stage). For stage-by-stage play: increment current_stage,
+        # then set self.resource_stations = self._choose_station_placements(state, self.current_stage).
+        self.current_stage = 0
+        
+        # Powerups on the map (spawned at map gen; one of each auto type for now)
+        self.powerups: List[Powerup] = []
+        # Which agents have which powerups: agent_id -> set of powerup_type
+        self.agent_powerups: Dict[int, set] = {}
+        # When agent is auto-walking to a station we set agent_auto_target[agent_id] = resource_type; clear when they reach station
+        self.agent_auto_target: Dict[int, str] = {}
+
+        # ESC confirmation overlay (in-game)
+        self.confirm_quit_selection = 0  # 0=Resume, 1=Quit to Menu
+        self.confirm_resume_rect: Optional[pygame.Rect] = None
+        self.confirm_quit_rect: Optional[pygame.Rect] = None
+
+        # Game over screen
+        self.last_game_over_reason: Optional[str] = None
+
+        # Pause flag (e.g., when window loses focus)
+        self.paused: bool = False
+    
+    def _choose_station_placements(self, state: ColonyState, stage_index: int) -> List[ResourceStation]:
+        """
+        Choose valid, non-overlapping positions for resource stations using deterministic RNG.
+        Uses (world_seed, stage_index) so each game and each stage gets different but reproducible layouts.
+        Ready for stage-by-stage play: call with state and current_stage when starting or advancing a stage.
+        """
+        seed = state.world_seed + stage_index * 10000
+        rng = random.Random(seed)
+        
+        occupied = set()
+        for a in state.agents:
+            if a.get("status") == "dead":
+                continue
+            loc = a.get("location")
+            if loc and len(loc) == 2:
+                occupied.add((int(loc[0]), int(loc[1])))
+        
+        def is_valid_placement(cx: int, cy: int, size: int, exclude: set) -> bool:
+            tiles = _station_tiles(cx, cy, size)
+            for (tx, ty) in tiles:
+                if tx < WORLD_MIN_X or tx >= WORLD_MAX_X or ty < WORLD_MIN_Y or ty >= WORLD_MAX_Y:
+                    return False
+                if (tx, ty) in exclude:
+                    return False
+                tile = state.get_tile_at(tx, ty)
+                if not tile.get("passable", True):
+                    return False
+            return True
+        
+        # Candidate centers: for 2x2, center can be in [MIN+1, MAX-2]; for 3x3, [MIN+1, MAX-3]
+        valid_2x2 = []
+        valid_3x3 = []
+        for cx in range(WORLD_MIN_X + 1, WORLD_MAX_X - 1):
+            for cy in range(WORLD_MIN_Y + 1, WORLD_MAX_Y - 1):
+                if is_valid_placement(cx, cy, 2, occupied):
+                    valid_2x2.append((cx, cy))
+                if is_valid_placement(cx, cy, 3, occupied):
+                    valid_3x3.append((cx, cy))
+        
+        if not valid_3x3 or not valid_2x2:
+            # Fallback: use fixed positions if map is too crowded
+            return [
+                ResourceStation("oxy_station_1", STATION_OXYGEN, -10, -10, size=2),
+                ResourceStation("cal_station_1", STATION_CALORIES, 10, -10, size=2),
+                ResourceStation("int_station_1", STATION_INTEGRITY, 0, 10, size=3),
+            ]
+        
+        rng.shuffle(valid_3x3)
+        rng.shuffle(valid_2x2)
+        
+        # Place integrity station first (3x3), then two 2x2 (oxygen, calories)
+        stations = []
+        int_cx, int_cy = valid_3x3[0]
+        occupied.update(_station_tiles(int_cx, int_cy, 3))
+        stations.append(ResourceStation("int_station_1", STATION_INTEGRITY, int_cx, int_cy, size=3))
+        
+        for (cx, cy) in valid_2x2:
+            if not is_valid_placement(cx, cy, 2, occupied):
+                continue
+            occupied.update(_station_tiles(cx, cy, 2))
+            if len(stations) == 1:
+                stations.append(ResourceStation("oxy_station_1", STATION_OXYGEN, cx, cy, size=2))
+            else:
+                stations.append(ResourceStation("cal_station_1", STATION_CALORIES, cx, cy, size=2))
+                break
+        if len(stations) < 3:
+            # Fallback again
+            return [
+                ResourceStation("oxy_station_1", STATION_OXYGEN, -10, -10, size=2),
+                ResourceStation("cal_station_1", STATION_CALORIES, 10, -10, size=2),
+                ResourceStation("int_station_1", STATION_INTEGRITY, 0, 10, size=3),
+            ]
+        return stations
+    
+    def _spawn_initial_powerups(self, state: ColonyState) -> None:
+        """Spawn one of each auto-walk powerup at valid tiles (not on agents or stations). Deterministic from world_seed."""
+        occupied = set()
+        for a in state.agents:
+            if a.get("status") == "dead":
+                continue
+            loc = a.get("location")
+            if loc and len(loc) == 2:
+                occupied.add((int(loc[0]), int(loc[1])))
+        for station in self.resource_stations:
+            occupied.update(station.get_tiles())
+        
+        candidates = []
+        for x in range(WORLD_MIN_X, WORLD_MAX_X):
+            for y in range(WORLD_MIN_Y, WORLD_MAX_Y):
+                if (x, y) in occupied:
+                    continue
+                tile = state.get_tile_at(x, y)
+                if tile.get("passable", True):
+                    candidates.append((x, y))
+        
+        rng = random.Random(state.world_seed + 9999)  # Different from station seed
+        rng.shuffle(candidates)
+        types = [POWERUP_AUTO_OXYGEN, POWERUP_AUTO_CALORIES, POWERUP_AUTO_INTEGRITY]
+        used = set()
+        for pt in candidates:
+            if len(self.powerups) >= 3:
+                break
+            if pt in used:
+                continue
+            used.add(pt)
+            self.powerups.append(Powerup(pt[0], pt[1], types[len(self.powerups)]))
     
     def _create_initial_game(self) -> GameEngine:
         """Create initial game state with agents and resource stations."""
@@ -241,12 +396,15 @@ class VisualGame:
             if not success:
                 print(f"Warning: Failed to add agent: {errors}")
         
-        # Create resource stations
-        self.resource_stations = [
-            ResourceStation("oxy_station_1", STATION_OXYGEN, -10, -10, size=2),
-            ResourceStation("cal_station_1", STATION_CALORIES, 10, -10, size=2),
-            ResourceStation("int_station_1", STATION_INTEGRITY, 0, 10, size=3),
-        ]
+        # Place resource stations (randomized per game and per stage; deterministic from seed + stage)
+        self.current_stage = 0
+        self.resource_stations = self._choose_station_placements(initial_state, self.current_stage)
+        
+        # Spawn one of each auto-walk powerup (deterministic from seed)
+        self.powerups = []
+        self.agent_powerups = {}
+        self.agent_auto_target = {}
+        self._spawn_initial_powerups(initial_state)
         
         # Adjust difficulty based on settings (slower game)
         if self.difficulty == "easy":
@@ -285,12 +443,12 @@ class VisualGame:
         screen_y = (world_y - self.camera_y) * ts + self.camera_height // 2
         return int(screen_x), int(screen_y)
     
-    def _screen_to_world(self, screen_x: int, screen_y: int) -> Tuple[int, int]:
-        """Convert screen coordinates to world coordinates."""
+    def _screen_to_world_tile(self, screen_x: int, screen_y: int) -> Tuple[int, int]:
+        """Convert screen coordinates to the tile under the cursor (rounded). Use for drag target and click-to-select so the intended tile is chosen."""
         ts = self._get_scaled_tile_size()
         world_x = (screen_x - self.camera_width // 2) / ts + self.camera_x
         world_y = (screen_y - self.camera_height // 2) / ts + self.camera_y
-        return int(world_x), int(world_y)
+        return round(world_x), round(world_y)
     
     def _draw_tile(self, x: int, y: int, terrain: str):
         """Draw a single tile at world coordinates."""
@@ -588,7 +746,22 @@ class VisualGame:
             loc_color = (255, 255, 200) if is_selected else COLOR_TEXT
             text_surface = self.font_small.render(loc_text, True, loc_color)
             self.screen.blit(text_surface, (sidebar_x + 10, y_offset))
-            y_offset += 25
+            y_offset += 18
+            # Powerup badges (auto-walk to station when resource low)
+            powers = self.agent_powerups.get(agent_id, set())
+            if powers and status != "dead":
+                badges = []
+                if POWERUP_AUTO_OXYGEN in powers:
+                    badges.append("O2")
+                if POWERUP_AUTO_CALORIES in powers:
+                    badges.append("Cal")
+                if POWERUP_AUTO_INTEGRITY in powers:
+                    badges.append("Int")
+                if badges:
+                    auto_text = "Auto: " + " ".join(badges)
+                    badge_surface = self.font_small.render(auto_text, True, (150, 220, 150))
+                    self.screen.blit(badge_surface, (sidebar_x + 10, y_offset))
+            y_offset += 20
         
         y_offset += 10
         
@@ -676,28 +849,38 @@ class VisualGame:
         return bar_y + bar_height + 5
     
     def _draw_event_notification(self):
-        """Draw event notification (red flashing text)."""
+        """Draw event notification centered over the gameplay area with a readable backdrop."""
         if self.current_event_text and self.event_start_time:
             current_time = pygame.time.get_ticks()
             elapsed = current_time - self.event_start_time
-            
+
             if elapsed < self.event_duration:
-                # Flash effect (on/off every 200ms)
-                visible = (elapsed // 200) % 2 == 0
-                if visible:
-                    # Draw large red text in center
-                    text_surface = self.font_large.render(self.current_event_text, True, COLOR_EVENT_TEXT)
-                    text_rect = text_surface.get_rect(center=(CAMERA_WIDTH // 2, CAMERA_HEIGHT // 2))
-                    
-                    # Add black outline for visibility
-                    outline_surface = self.font_large.render(self.current_event_text, True, (0, 0, 0))
-                    for dx, dy in [(-2, -2), (-2, 2), (2, -2), (2, 2), (-2, 0), (2, 0), (0, -2), (0, 2)]:
-                        outline_rect = text_rect.copy()
-                        outline_rect.x += dx
-                        outline_rect.y += dy
-                        self.screen.blit(outline_surface, outline_rect)
-                    
-                    self.screen.blit(text_surface, text_rect)
+                # Center on the gameplay (camera) area, independent of zoom
+                center_x = self.camera_width // 2
+                center_y = self.camera_height // 2
+
+                # Render main text and a soft shadow
+                text_surface = self.font_large.render(self.current_event_text, True, COLOR_EVENT_TEXT)
+                shadow_surface = self.font_large.render(self.current_event_text, True, (0, 0, 0))
+                text_rect = text_surface.get_rect(center=(center_x, center_y))
+                shadow_rect = shadow_surface.get_rect(center=(center_x + 2, center_y + 2))
+
+                # Background box behind text for readability
+                padding_x, padding_y = 20, 10
+                bg_rect = pygame.Rect(
+                    text_rect.left - padding_x,
+                    text_rect.top - padding_y,
+                    text_rect.width + 2 * padding_x,
+                    text_rect.height + 2 * padding_y,
+                )
+                # Slightly transparent dark box
+                bg_surface = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
+                bg_surface.fill((0, 0, 0, 170))
+                self.screen.blit(bg_surface, (bg_rect.x, bg_rect.y))
+
+                # Draw shadow then text
+                self.screen.blit(shadow_surface, shadow_rect)
+                self.screen.blit(text_surface, text_rect)
             else:
                 # Clear event after duration
                 self.current_event_text = None
@@ -766,10 +949,31 @@ class VisualGame:
             self.camera_x = min(WORLD_MAX_X - CAMERA_WIDTH // (2 * TILE_SIZE), 
                               self.camera_x + camera_speed)
         
-        # Mouse clicks and wheel
+        # Mouse clicks, wheel, and window events
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return False
+
+            # Pause when window loses focus; resume when it gains focus again
+            # Use both modern WINDOWFOCUS events and legacy ACTIVEEVENT as fallback.
+            if event.type == getattr(pygame, "WINDOWFOCUSLOST", None):
+                self.paused = True
+            elif event.type == getattr(pygame, "WINDOWFOCUSGAINED", None):
+                self.paused = False
+                # Reset timers so turns/decay don't jump while paused
+                now = pygame.time.get_ticks()
+                self.last_turn_time = now
+                self.last_decay_time = now
+            elif event.type == getattr(pygame, "ACTIVEEVENT", None):
+                # state bit 2 = focus, gain 0 = lost, 1 = gained
+                if getattr(event, "state", 0) & 2:
+                    if getattr(event, "gain", 0) == 0:
+                        self.paused = True
+                    else:
+                        self.paused = False
+                        now = pygame.time.get_ticks()
+                        self.last_turn_time = now
+                        self.last_decay_time = now
             
             if event.type == pygame.MOUSEWHEEL:
                 mouse_x, mouse_y = pygame.mouse.get_pos()
@@ -807,9 +1011,9 @@ class VisualGame:
                         self.camera_height = CAMERA_HEIGHT
                         self.sidebar_width = SIDEBAR_WIDTH
                 elif event.key == pygame.K_ESCAPE:
-                    # Return to menu
-                    self.game_state = STATE_MENU
-                    self.game = None
+                    # Open confirmation overlay instead of instantly quitting
+                    self.confirm_quit_selection = 0
+                    self.game_state = STATE_CONFIRM_QUIT
                     return True
             
             if event.type == pygame.MOUSEBUTTONDOWN:
@@ -827,9 +1031,9 @@ class VisualGame:
                     elif hasattr(self, 'recruit_button_rect') and self.recruit_button_rect.collidepoint(mouse_pos):
                         self._recruit_agent()
                 
-                # Check if click is in game area
+                # Check if click is in game area (use tile under cursor so target matches what user sees)
                 if mouse_x < self.camera_width:
-                    world_x, world_y = self._screen_to_world(mouse_x, mouse_y)
+                    world_x, world_y = self._screen_to_world_tile(mouse_x, mouse_y)
                     
                     if event.button == 1:  # Left click - select or start drag
                         agent_here = self._get_agent_id_at(world_x, world_y)
@@ -847,15 +1051,138 @@ class VisualGame:
                 if event.button == 1 and self.drag_agent_id is not None:
                     mouse_x, mouse_y = pygame.mouse.get_pos()
                     if mouse_x < self.camera_width:
-                        world_x, world_y = self._screen_to_world(mouse_x, mouse_y)
+                        world_x, world_y = self._screen_to_world_tile(mouse_x, mouse_y)
                         self._assign_task_at(world_x, world_y, agent_id=self.drag_agent_id)
                     self.drag_agent_id = None
                     self.drag_start_screen = None
         
         return True
+
+    def _handle_confirm_quit_input(self):
+        """Handle input for the ESC quit confirmation overlay (pauses gameplay updates)."""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return False
+
+            if event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_ESCAPE, pygame.K_n):
+                    self.game_state = STATE_PLAYING
+                    return True
+                if event.key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_y):
+                    # Quit to menu
+                    self.game_state = STATE_MENU
+                    self.game = None
+                    return True
+                if event.key in (pygame.K_LEFT, pygame.K_RIGHT, pygame.K_TAB):
+                    self.confirm_quit_selection = 1 - self.confirm_quit_selection
+
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mouse_pos = pygame.mouse.get_pos()
+                if self.confirm_resume_rect and self.confirm_resume_rect.collidepoint(mouse_pos):
+                    self.game_state = STATE_PLAYING
+                    return True
+                if self.confirm_quit_rect and self.confirm_quit_rect.collidepoint(mouse_pos):
+                    self.game_state = STATE_MENU
+                    self.game = None
+                    return True
+
+        return True
+
+    def _handle_game_over_input(self):
+        """Handle input on the Game Over screen."""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return False
+            if event.type == pygame.KEYDOWN:
+                # Any key: return to main menu
+                if event.key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE, pygame.K_y, pygame.K_n):
+                    self.game_state = STATE_MENU
+                    self.game = None
+                    return True
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                # Any click: return to main menu
+                self.game_state = STATE_MENU
+                self.game = None
+                return True
+        return True
+
+    def _draw_confirm_quit_overlay(self):
+        """Draw a simple confirmation overlay on top of the game view."""
+        # Dim the screen
+        overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        self.screen.blit(overlay, (0, 0))
+
+        # Panel
+        panel_w, panel_h = 420, 200
+        panel_x = WINDOW_WIDTH // 2 - panel_w // 2
+        panel_y = WINDOW_HEIGHT // 2 - panel_h // 2
+        panel_rect = pygame.Rect(panel_x, panel_y, panel_w, panel_h)
+        pygame.draw.rect(self.screen, (40, 40, 55), panel_rect)
+        pygame.draw.rect(self.screen, COLOR_TEXT, panel_rect, 2)
+
+        title = self.font_large.render("Quit to Menu?", True, COLOR_TEXT)
+        self.screen.blit(title, title.get_rect(center=(WINDOW_WIDTH // 2, panel_y + 50)))
+
+        subtitle = self.font_small.render("Your current game will be lost.", True, (180, 180, 200))
+        self.screen.blit(subtitle, subtitle.get_rect(center=(WINDOW_WIDTH // 2, panel_y + 85)))
+
+        # Buttons
+        btn_w, btn_h = 150, 44
+        gap = 30
+        resume_rect = pygame.Rect(WINDOW_WIDTH // 2 - gap // 2 - btn_w, panel_y + 120, btn_w, btn_h)
+        quit_rect = pygame.Rect(WINDOW_WIDTH // 2 + gap // 2, panel_y + 120, btn_w, btn_h)
+        self.confirm_resume_rect = resume_rect
+        self.confirm_quit_rect = quit_rect
+
+        resume_color = COLOR_BUTTON_SELECTED if self.confirm_quit_selection == 0 else COLOR_BUTTON
+        quit_color = COLOR_BUTTON_SELECTED if self.confirm_quit_selection == 1 else COLOR_BUTTON
+
+        pygame.draw.rect(self.screen, resume_color, resume_rect)
+        pygame.draw.rect(self.screen, COLOR_TEXT, resume_rect, 2)
+        pygame.draw.rect(self.screen, quit_color, quit_rect)
+        pygame.draw.rect(self.screen, COLOR_TEXT, quit_rect, 2)
+
+        resume_text = self.font.render("Resume", True, COLOR_TEXT)
+        quit_text = self.font.render("Quit", True, COLOR_TEXT)
+        self.screen.blit(resume_text, resume_text.get_rect(center=resume_rect.center))
+        self.screen.blit(quit_text, quit_text.get_rect(center=quit_rect.center))
+
+    def _draw_game_over_screen(self):
+        """Draw a dedicated Game Over screen with explanation and prompt."""
+        self.screen.fill(COLOR_MENU_BG)
+
+        title = self.font_large.render("Game Over", True, COLOR_TEXT)
+        self.screen.blit(title, title.get_rect(center=(WINDOW_WIDTH // 2, 140)))
+
+        reason = self.last_game_over_reason or "The colony has failed."
+        # Wrap reason into a few lines if long
+        y = 200
+        max_width = WINDOW_WIDTH - 120
+        words = reason.split()
+        line = ""
+        lines: List[str] = []
+        for w in words:
+            test = (line + " " + w).strip()
+            surf = self.font_small.render(test, True, COLOR_TEXT)
+            if surf.get_width() > max_width and line:
+                lines.append(line)
+                line = w
+            else:
+                line = test
+        if line:
+            lines.append(line)
+
+        for l in lines:
+            surf = self.font_small.render(l, True, COLOR_TEXT)
+            self.screen.blit(surf, surf.get_rect(center=(WINDOW_WIDTH // 2, y)))
+            y += 28
+
+        prompt = self.font.render("Press any key or click to return to the main menu.", True, (200, 200, 220))
+        self.screen.blit(prompt, prompt.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT - 120)))
     
     def _get_agent_id_at(self, world_x: int, world_y: int) -> Optional[int]:
-        """Return agent id at world coordinates, or None. Uses visual pos when agent is walking. Skips dead agents."""
+        """Return agent id at world coordinates, or None, using a tighter circular hitbox. Skips dead agents."""
         if not self.game:
             return None
         state = self.game.get_state()
@@ -871,12 +1198,15 @@ class VisualGame:
                 if not loc or not isinstance(loc, (tuple, list)) or len(loc) != 2:
                     continue
                 ax, ay = float(loc[0]), float(loc[1])
-            if abs(ax - world_x) <= 1.5 and abs(ay - world_y) <= 1.5:
+            # Tighter circular hitbox: within ~0.75 tiles of the agent
+            dx = ax - float(world_x)
+            dy = ay - float(world_y)
+            if dx * dx + dy * dy <= 0.75 * 0.75:
                 return agent_id
         return None
     
     def _select_agent_at(self, world_x: int, world_y: int):
-        """Select agent at world coordinates. Skips dead agents."""
+        """Select agent at world coordinates, using the same tighter circular hitbox. Skips dead agents."""
         state = self.game.get_state()
         self.selected_agent_id = None
         
@@ -886,9 +1216,10 @@ class VisualGame:
                 continue
             loc = agent.get("location")
             if loc and isinstance(loc, (tuple, list)) and len(loc) == 2:
-                ax, ay = int(loc[0]), int(loc[1])
-                # Check if click is near agent (within 1 tile)
-                if abs(ax - world_x) <= 1 and abs(ay - world_y) <= 1:
+                ax, ay = float(loc[0]), float(loc[1])
+                dx = ax - float(world_x)
+                dy = ay - float(world_y)
+                if dx * dx + dy * dy <= 0.75 * 0.75:
                     self.selected_agent_id = agent.get("id")
                     break
     
@@ -1231,13 +1562,18 @@ class VisualGame:
                 event_desc = f"{event_type.upper()} at {event_location}"
                 self._show_event(event_desc)
             
-            # Check for game over
+            # Check for game over (only after a turn, so player sees why)
             if self.game.is_game_over():
-                self._show_event("GAME OVER - COLONY FAILED")
-                # Return to menu after a delay
-                pygame.time.wait(3000)
-                self.game_state = STATE_MENU
-                self.game = None
+                state = self.game.get_state()
+                living = [a for a in state.agents if a.get("status") != "dead"]
+                if not living and state.agents:
+                    self.last_game_over_reason = "All agents have died. There is no one left to respond to disasters."
+                elif state.resources.get("integrity", 100.0) <= 0:
+                    self.last_game_over_reason = "Colony integrity reached 0%. The habitat has failed catastrophically."
+                else:
+                    self.last_game_over_reason = "The colony can no longer continue operating."
+                # Switch to a dedicated Game Over screen instead of jumping straight to menu
+                self.game_state = STATE_GAME_OVER
     
     def _draw_menu(self):
         """Draw the main menu screen. Returns list of button rects for click detection."""
@@ -1310,8 +1646,13 @@ class VisualGame:
         
         # Title
         title = self.font_large.render("Advanced Options", True, COLOR_TEXT)
-        title_rect = title.get_rect(center=(WINDOW_WIDTH // 2, 100))
+        title_rect = title.get_rect(center=(WINDOW_WIDTH // 2, 80))
         self.screen.blit(title, title_rect)
+        
+        # Subtitle: click left/right or use keys
+        hint = self.font_small.render("Click left side (−) or right side (+) to adjust  •  Arrow keys / +/- work too", True, (180, 180, 200))
+        hint_rect = hint.get_rect(center=(WINDOW_WIDTH // 2, 115))
+        self.screen.blit(hint, hint_rect)
         
         # Algorithm selection
         algo_text = f"Algorithm: {self.algorithm.upper()}"
@@ -1329,28 +1670,43 @@ class VisualGame:
             decay_text,
             "Back"
         ]
-        y_start = 250
+        # Rows that use left/right click to adjust (show split)
+        slider_rows = {1, 2}  # Turn Speed, Decay Rate
+        
+        y_start = 200
         self.advanced_button_rects = []
         
         for i, option_text in enumerate(options_list):
-            y = y_start + i * 60
+            y = y_start + i * 56
             color = COLOR_BUTTON_SELECTED if i == self.advanced_selection else COLOR_BUTTON
             
-            button_rect = pygame.Rect(WINDOW_WIDTH // 2 - 200, y - 10, 400, 50)
+            button_rect = pygame.Rect(WINDOW_WIDTH // 2 - 200, y - 8, 400, 48)
             self.advanced_button_rects.append(button_rect)
             
             pygame.draw.rect(self.screen, color, button_rect)
             pygame.draw.rect(self.screen, COLOR_TEXT, button_rect, 2)
             
+            # For Turn Speed and Decay Rate: show − and + so user sees left=decrease, right=increase
+            if i in slider_rows:
+                mid_x = button_rect.centerx
+                pygame.draw.line(self.screen, (100, 100, 120), (mid_x, button_rect.top + 4), (mid_x, button_rect.bottom - 4), 2)
+                # Minus on left half (use Unicode minus for clarity)
+                minus_surf = self.font.render("−", True, (200, 200, 220))
+                minus_rect = minus_surf.get_rect(center=(button_rect.left + 40, button_rect.centery))
+                self.screen.blit(minus_surf, minus_rect)
+                # Plus on right half
+                plus_surf = self.font.render("+", True, (200, 200, 220))
+                plus_rect = plus_surf.get_rect(center=(button_rect.right - 40, button_rect.centery))
+                self.screen.blit(plus_surf, plus_rect)
+            
+            # Main label (centered)
             text = self.font.render(option_text, True, COLOR_TEXT)
-            text_rect = text.get_rect(center=(WINDOW_WIDTH // 2, y + 15))
+            text_rect = text.get_rect(center=(WINDOW_WIDTH // 2, y + 18))
             self.screen.blit(text, text_rect)
         
         # Show algorithm options when selected (position below buttons to avoid overlap)
         if self.advanced_selection == 0:
-            # Position algorithm options after all buttons (button 2 ends at y_start + 2*60 + 40 = 370)
-            # Place options at 380+ to ensure no overlap
-            algo_y = y_start + len(options_list) * 60 + 20  # After all buttons with spacing
+            algo_y = y_start + len(options_list) * 56 + 20  # After all buttons with spacing
             for i, algo in enumerate(algo_options):
                 x = WINDOW_WIDTH // 2 - 100 + i * 70
                 algo_color = COLOR_BUTTON_SELECTED if algo.lower().replace("*", "star").replace(" ", "_") == self.algorithm else COLOR_BUTTON
@@ -1363,16 +1719,14 @@ class VisualGame:
         
         # Show turn speed adjustment when selected
         if self.advanced_selection == 1:
-            # Position speed controls after all buttons to avoid overlap
-            speed_y = y_start + len(options_list) * 60 + 20  # After all buttons with spacing
+            speed_y = y_start + len(options_list) * 56 + 20  # After all buttons with spacing
             speed_text = self.font_small.render("- = harder (faster)  + = easier (slower)  Min: 1s", True, COLOR_TEXT)
             speed_text_rect = speed_text.get_rect(center=(WINDOW_WIDTH // 2, speed_y))
             self.screen.blit(speed_text, speed_text_rect)
         
         # Show decay rate adjustment when selected
         if self.advanced_selection == 2:
-            # Position decay controls after all buttons to avoid overlap
-            decay_y = y_start + len(options_list) * 60 + 20  # After all buttons with spacing
+            decay_y = y_start + len(options_list) * 56 + 20  # After all buttons with spacing
             decay_text = self.font_small.render("- = faster decay (harder)  + = slower decay (easier)  Range: 0.1x-3.0x", True, COLOR_TEXT)
             decay_text_rect = decay_text.get_rect(center=(WINDOW_WIDTH // 2, decay_y))
             self.screen.blit(decay_text, decay_text_rect)
@@ -1398,6 +1752,8 @@ class VisualGame:
             "Gameplay:",
             "  Recruit Agent - Click button (costs 30 each)",
             "  Stations restore resources (O/C/R icons)",
+            "  Powerups (O/Cal/Int circles): collect to grant",
+            "  auto-walk (agent goes to station if that resource < 20%)",
             "  Agents die if any resource reaches 0",
             "  Mouse wheel on sidebar - Scroll agents",
             "",
@@ -1476,6 +1832,38 @@ class VisualGame:
             if (world_x, world_y) in tiles:
                 return station
         return None
+    
+    def _get_station_for_resource(self, resource_type: str) -> Optional[ResourceStation]:
+        """Get the resource station that restores the given resource (oxygen, calories, integrity)."""
+        for station in self.resource_stations:
+            if station.get_resource_type() == resource_type:
+                return station
+        return None
+    
+    def _draw_powerups(self):
+        """Draw powerup pickups on the map with simple icons (O=oxygen, C=calories, R=integrity)."""
+        ts = int(self._get_scaled_tile_size())
+        for p in self.powerups:
+            if not (WORLD_MIN_X <= p.x < WORLD_MAX_X and WORLD_MIN_Y <= p.y < WORLD_MAX_Y):
+                continue
+            screen_x, screen_y = self._world_to_screen(p.x, p.y)
+            if -ts > screen_x or screen_x > self.camera_width + ts or -ts > screen_y or screen_y > self.camera_height + ts:
+                continue
+            radius = max(6, ts // 3)
+            if p.powerup_type == POWERUP_AUTO_OXYGEN:
+                color = COLOR_STATION_OXYGEN
+                icon = "O"
+            elif p.powerup_type == POWERUP_AUTO_CALORIES:
+                color = COLOR_STATION_CALORIES
+                icon = "C"
+            else:
+                color = COLOR_STATION_INTEGRITY
+                icon = "R"
+            pygame.draw.circle(self.screen, color, (screen_x, screen_y), radius)
+            pygame.draw.circle(self.screen, (255, 255, 255), (screen_x, screen_y), radius, 2)
+            text = self.font_small.render(icon, True, (255, 255, 255))
+            text_rect = text.get_rect(center=(screen_x, screen_y))
+            self.screen.blit(text, text_rect)
     
     def _draw_setup(self):
         """Draw new game setup screen (starting agent count)."""
@@ -1707,6 +2095,108 @@ class VisualGame:
         
         return True
     
+    def _check_powerup_pickups(self):
+        """If an agent is on a powerup tile, collect it and grant that agent the powerup."""
+        if not self.game or not self.powerups:
+            return
+        state = self.game.get_state()
+        to_remove = []
+        for p in self.powerups:
+            for agent in state.agents:
+                if agent.get("status") == "dead":
+                    continue
+                loc = agent.get("location")
+                if not loc or len(loc) != 2:
+                    continue
+                if (int(loc[0]), int(loc[1])) != (p.x, p.y):
+                    continue
+                agent_id = agent.get("id")
+                if agent_id is not None:
+                    self.agent_powerups.setdefault(agent_id, set()).add(p.powerup_type)
+                    to_remove.append(p)
+                    self._show_event("Auto-walk powerup collected!")
+                break
+        self.powerups = [p for p in self.powerups if p not in to_remove]
+    
+    def _apply_auto_walk_powerups(self):
+        """
+        If an agent has auto-walk powerups and resources are below 20%, prioritize the LOWEST resource.
+        Walk to that station first, then after restoring, walk to the next lowest.
+        Prevents loops by only assigning one task at a time and tracking which resource we're targeting.
+        """
+        if not self.game:
+            return
+        state = self.game.get_state()
+        
+        # Safety check: clear auto-target if agent has no path (pathfinding might have failed)
+        for agent_id in list(self.agent_auto_target.keys()):
+            if agent_id not in self.agent_paths:
+                self.agent_auto_target.pop(agent_id, None)
+        
+        for agent in state.agents:
+            if agent.get("status") == "dead":
+                continue
+            agent_id = agent.get("id")
+            if agent_id is None:
+                continue
+            
+            powers = self.agent_powerups.get(agent_id) or set()
+            if not powers:
+                continue
+            
+            # Map powerup types to resource types and collect resources below threshold
+            resource_map = {
+                POWERUP_AUTO_OXYGEN: "oxygen",
+                POWERUP_AUTO_CALORIES: "calories",
+                POWERUP_AUTO_INTEGRITY: "integrity"
+            }
+            
+            # Find all resources below 20% for which agent has powerups
+            low_resources = []
+            for powerup_type, resource_type in resource_map.items():
+                if powerup_type not in powers:
+                    continue
+                value = agent.get(resource_type, 100.0)
+                if value < AUTO_WALK_THRESHOLD:
+                    low_resources.append((value, resource_type, powerup_type))
+            
+            if not low_resources:
+                # All resources are above threshold - clear any auto-target if set
+                self.agent_auto_target.pop(agent_id, None)
+                continue
+            
+            # Sort by value (lowest first) - prioritize the most critical resource
+            low_resources.sort(key=lambda x: x[0])
+            lowest_value, lowest_resource_type, _ = low_resources[0]
+            
+            # Check if agent is already auto-walking to a station
+            current_target = self.agent_auto_target.get(agent_id)
+            
+            # If already walking to a station, check if we need to switch to a lower priority resource
+            if current_target:
+                # Find the value of the resource we're currently targeting
+                current_value = agent.get(current_target, 100.0)
+                # If the lowest resource is lower than what we're targeting, switch
+                if lowest_value < current_value:
+                    # Switch to lower priority resource
+                    station = self._get_station_for_resource(lowest_resource_type)
+                    if station:
+                        self.agent_paths.pop(agent_id, None)
+                        self._assign_task_at(station.center_x, station.center_y, agent_id=agent_id)
+                        # Only set auto-target if path was successfully assigned
+                        if agent_id in self.agent_paths:
+                            self.agent_auto_target[agent_id] = lowest_resource_type
+                # Otherwise, continue walking to current target
+            else:
+                # Not currently auto-walking - assign task to lowest resource
+                station = self._get_station_for_resource(lowest_resource_type)
+                if station:
+                    self.agent_paths.pop(agent_id, None)
+                    self._assign_task_at(station.center_x, station.center_y, agent_id=agent_id)
+                    # Only set auto-target if path was successfully assigned
+                    if agent_id in self.agent_paths:
+                        self.agent_auto_target[agent_id] = lowest_resource_type
+    
     def _check_station_visits(self):
         """Check if agents are at stations and restore resources."""
         if not self.game:
@@ -1734,6 +2224,11 @@ class VisualGame:
                             {resource_type: new_value},
                             validate=False
                         )
+                        # Only clear auto-target if this is the resource we were targeting
+                        if self.agent_auto_target.get(agent_id) == resource_type:
+                            self.agent_auto_target.pop(agent_id, None)
+                            # Immediately check if there are other low resources to walk to
+                            # (will be handled by _apply_auto_walk_powerups next frame)
     
     def run(self):
         """Main game loop."""
@@ -1751,17 +2246,23 @@ class VisualGame:
                 running = self._handle_advanced_input()
             elif self.game_state == STATE_CONTROLS:
                 running = self._handle_controls_input()
+            elif self.game_state == STATE_CONFIRM_QUIT:
+                running = self._handle_confirm_quit_input()
+            elif self.game_state == STATE_GAME_OVER:
+                running = self._handle_game_over_input()
             else:  # STATE_PLAYING
                 running = self._handle_input()
             
-            # Update game - only when playing
-            if self.game_state == STATE_PLAYING and self.game:
+            # Update game - only when playing and not paused
+            if self.game_state == STATE_PLAYING and self.game and not self.paused:
                 # Smooth agent movement every frame (independent of turn timer)
                 dt_ms = self.clock.get_time()
                 self._update_smooth_agent_movement(dt_ms / 1000.0)
                 # Turn progression (resource drain, etc.) on second-based timer
                 self._update_game()
                 self._check_station_visits()
+                self._check_powerup_pickups()
+                self._apply_auto_walk_powerups()
             
             # Clear screen
             self.screen.fill(COLOR_BACKGROUND)
@@ -1777,11 +2278,26 @@ class VisualGame:
                 self._draw_advanced()
             elif self.game_state == STATE_CONTROLS:
                 self._draw_controls()
+            elif self.game_state == STATE_CONFIRM_QUIT:
+                # Draw paused gameplay in background + overlay
+                if self.game:
+                    self._draw_map()
+                    self._draw_resource_stations()
+                    self._draw_powerups()
+                    self._draw_task_destinations()
+                    self._draw_agents()
+                    self._draw_drag_preview()
+                    self._draw_sidebar()
+                    self._draw_event_notification()
+                self._draw_confirm_quit_overlay()
+            elif self.game_state == STATE_GAME_OVER:
+                self._draw_game_over_screen()
             else:  # STATE_PLAYING
                 if self.game:
                     # Draw everything
                     self._draw_map()
                     self._draw_resource_stations()
+                    self._draw_powerups()
                     self._draw_task_destinations()
                     self._draw_agents()
                     self._draw_drag_preview()

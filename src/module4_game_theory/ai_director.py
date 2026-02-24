@@ -256,19 +256,111 @@ class AIDirector:
             colony_state: Current state
             
         Returns:
-            List of vulnerability descriptions
-        
-        TODO: Implement vulnerability identification
-        - Add a multiplier to weakness score based on resources avilibility (8 oxygen tanks is less vulnerable than 1 oxygen tank, so target the ones with the least amount)
+            List of human-readable vulnerability descriptions
         """
 
-        vulnerabilities = []
-        
-        for resource, level in colony_state.resources.items():
-            if level < 30.0:
-                vulnerabilities.append(f"Low {resource}: {level:.1f}%")
-        
-        if len(colony_state.agents) < 3:
-            vulnerabilities.append(f"Few agents: {len(colony_state.agents)}")
-        
+        vulnerabilities: List[str] = []
+
+        resources = colony_state.resources
+        agents = colony_state.agents
+        living_agents = [a for a in agents if a.get("status") != "dead"]
+
+        # --- Global resource levels ---
+        low_resources: List[str] = []
+        critical_resources: List[str] = []
+        for resource, level in resources.items():
+            if level < 20.0:
+                critical_resources.append(resource)
+                vulnerabilities.append(f"CRITICAL {resource} level: {level:.1f}%")
+            elif level < 40.0:
+                low_resources.append(resource)
+                vulnerabilities.append(f"Low {resource} reserve: {level:.1f}%")
+
+        if len(critical_resources) >= 2:
+            vulnerabilities.append(
+                f"Multiple resources in critical range: {', '.join(sorted(critical_resources))}"
+            )
+        elif len(low_resources) + len(critical_resources) >= 2:
+            vulnerabilities.append(
+                f"Several resources are low: {', '.join(sorted(low_resources + critical_resources))}"
+            )
+
+        # --- Agent count and status ---
+        if len(living_agents) == 0 and agents:
+            vulnerabilities.append("All agents are dead – colony cannot respond to events.")
+        elif len(living_agents) < 2:
+            vulnerabilities.append(
+                f"Very few active agents ({len(living_agents)}); colony is fragile to any disruption."
+            )
+        elif len(living_agents) < 4:
+            vulnerabilities.append(
+                f"Low active agent count ({len(living_agents)}); limited capacity to recover from events."
+            )
+
+        dead_count = sum(1 for a in agents if a.get("status") == "dead")
+        if dead_count > 0:
+            vulnerabilities.append(f"{dead_count} agent(s) already dead – reduced redundancy.")
+
+        # --- Per-agent resource health ---
+        for agent in living_agents:
+            name = agent.get("name", f"Agent {agent.get('id')}")
+            for res_name in ("oxygen", "calories", "integrity"):
+                value = agent.get(res_name, 100.0)
+                if value < 20.0:
+                    vulnerabilities.append(
+                        f"{name} has critically low {res_name} ({value:.1f}%)"
+                    )
+                elif value < 40.0:
+                    vulnerabilities.append(
+                        f"{name} has low {res_name} ({value:.1f}%)"
+                    )
+
+        # --- Distance / positioning heuristics ---
+        # We don't know exact station locations in this module, but we can approximate:
+        # - (0, 0) acts as a "core" / hub location
+        # - Large distances from the core mean slower access to any centralized resource
+        if living_agents:
+            distances = []
+            for a in living_agents:
+                loc = a.get("location")
+                if isinstance(loc, (tuple, list)) and len(loc) == 2:
+                    x, y = float(loc[0]), float(loc[1])
+                    # Use Manhattan distance from origin as a simple proxy
+                    distances.append(abs(x) + abs(y))
+            if distances:
+                avg_dist = sum(distances) / len(distances)
+                max_dist = max(distances)
+                if avg_dist > 20.0:
+                    vulnerabilities.append(
+                        f"Agents are on average far from the core (avg distance {avg_dist:.1f}); slow access to resources."
+                    )
+                if max_dist > 30.0:
+                    vulnerabilities.append(
+                        f"Some agents are extremely isolated from the core (max distance {max_dist:.1f})."
+                    )
+
+        # --- Infrastructure / redundancy ---
+        infra = colony_state.infrastructure or {}
+        if not infra:
+            vulnerabilities.append("No infrastructure locations defined; no explicit redundancy for life-support systems.")
+        else:
+            failed = []
+            damaged = []
+            for name, info in infra.items():
+                status = (info or {}).get("status", "")
+                integrity = (info or {}).get("integrity", 100.0)
+                if status == "failed" or integrity <= 0:
+                    failed.append(name)
+                elif status == "damaged" or integrity < 50.0:
+                    damaged.append(name)
+
+            if failed:
+                vulnerabilities.append(
+                    f"Infrastructure failed at: {', '.join(sorted(failed))}"
+                )
+            if damaged and not failed:
+                vulnerabilities.append(
+                    f"Infrastructure damaged at: {', '.join(sorted(damaged))}"
+                )
+
         return vulnerabilities

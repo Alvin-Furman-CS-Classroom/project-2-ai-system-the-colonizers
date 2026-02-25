@@ -9,11 +9,22 @@ import pygame
 import sys
 import math
 import random
+import os
 from typing import Dict, List, Tuple, Optional, Any
 from src.game_engine import GameEngine
 from src.module1_state.colony_state import ColonyState
 from src.module2_search.task_planner import Task
 from src.module1_state.procedural_tiles import clear_tile_cache
+
+# Asset loading
+# visual_game.py lives at the project root, alongside the top-level assets/ folder.
+ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
+
+
+def load_image(*path_parts: str) -> pygame.Surface:
+    """Load an image from the assets directory with alpha preserved."""
+    path = os.path.join(ASSET_DIR, *path_parts)
+    return pygame.image.load(path).convert_alpha()
 
 # Constants
 TILE_SIZE = 32  # Size of each tile in pixels
@@ -195,6 +206,8 @@ class VisualGame:
         # Smooth movement: interpolated (x, y) for agents in transit
         self.agent_visual_pos: Dict[int, Tuple[float, float]] = {}
         self.agent_move_speed = 2.5  # Tiles per second
+        # Last-drawn sprite rects per agent (for hit-testing in screen space)
+        self.agent_sprite_rects: Dict[int, pygame.Rect] = {}
         
         # Click-and-drag: assign destination by dragging from agent
         self.drag_agent_id: Optional[int] = None
@@ -248,6 +261,90 @@ class VisualGame:
 
         # Pause flag (e.g., when window loses focus)
         self.paused: bool = False
+
+        # --- Sprites / textures (loaded from assets/) ---
+        # Terrain tiles (filenames can be adjusted if yours differ)
+        try:
+            self.img_tile_grass = load_image("tiles", "tile_grass_01.png")
+        except Exception as e:
+            print("Failed to load tile_grass_01.png:", e)
+            self.img_tile_grass = None
+        try:
+            self.img_tile_sand = load_image("tiles", "tile_sand_01.png")
+        except Exception as e:
+            print("Failed to load tile_sand_01.png:", e)
+            self.img_tile_sand = None
+        try:
+            self.img_tile_water = load_image("tiles", "tile_water_01.png")
+        except Exception as e:
+            print("Failed to load tile_water_01.png:", e)
+            self.img_tile_water = None
+        try:
+            self.img_tile_rock = load_image("tiles", "tile_rock_01.png")
+        except Exception as e:
+            print("Failed to load tile_rock_01.png:", e)
+            self.img_tile_rock = None
+        try:
+            self.img_tile_dirt = load_image("tiles", "tile_dirt_01.png")
+        except Exception as e:
+            print("Failed to load tile_dirt_01.png:", e)
+            self.img_tile_dirt = None
+
+        # Agents
+        try:
+            self.img_agent_idle = load_image("agents", "agent_idle.png")
+        except Exception as e:
+            print("Failed to load agent_idle.png:", e)
+            self.img_agent_idle = None
+        try:
+            self.img_agent_walk_1 = load_image("agents", "agent_walk_1.png")
+        except Exception as e:
+            print("Failed to load agent_walk_1.png:", e)
+            self.img_agent_walk_1 = None
+        try:
+            self.img_agent_walk_2 = load_image("agents", "agent_walk_2.png")
+        except Exception as e:
+            print("Failed to load agent_walk_2.png:", e)
+            self.img_agent_walk_2 = None
+        try:
+            self.img_agent_dead = load_image("agents", "agent_dead.png")
+        except Exception as e:
+            print("Failed to load agent_dead.png:", e)
+            self.img_agent_dead = None
+
+        # Stations
+        try:
+            self.img_station_oxygen = load_image("stations", "station_oxygen_3x3.png")
+        except Exception as e:
+            print("Failed to load station_oxygen_3x3.png:", e)
+            self.img_station_oxygen = None
+        try:
+            self.img_station_calories = load_image("stations", "station_calories_2x2.png")
+        except Exception as e:
+            print("Failed to load station_calories_2x2.png:", e)
+            self.img_station_calories = None
+        try:
+            self.img_station_integrity = load_image("stations", "station_integrity_3x3.png")
+        except Exception as e:
+            print("Failed to load station_integrity_3x3.png:", e)
+            self.img_station_integrity = None
+
+        # Powerups
+        try:
+            self.img_powerup_o2 = load_image("powerups", "powerup_auto_oxygen.png")
+        except Exception as e:
+            print("Failed to load powerup_auto_oxygen.png:", e)
+            self.img_powerup_o2 = None
+        try:
+            self.img_powerup_cal = load_image("powerups", "powerup_auto_calories.png")
+        except Exception as e:
+            print("Failed to load powerup_auto_calories.png:", e)
+            self.img_powerup_cal = None
+        try:
+            self.img_powerup_int = load_image("powerups", "powerup_auto_integrity.png")
+        except Exception as e:
+            print("Failed to load powerup_auto_integrity.png:", e)
+            self.img_powerup_int = None
     
     def _choose_station_placements(self, state: ColonyState, stage_index: int) -> List[ResourceStation]:
         """
@@ -457,10 +554,29 @@ class VisualGame:
         
         # Only draw if tile is visible
         if -ts <= screen_x <= self.camera_width + ts and -ts <= screen_y <= self.camera_height + ts:
-            color = self._get_tile_color(terrain)
-            rect = pygame.Rect(screen_x - ts // 2, screen_y - ts // 2, ts, ts)
-            pygame.draw.rect(self.screen, color, rect)
-            pygame.draw.rect(self.screen, (0, 0, 0), rect, 1)  # Border
+            # Prefer textured tiles if available, fall back to solid colors otherwise
+            img = None
+            if terrain == "grass" and self.img_tile_grass:
+                img = self.img_tile_grass
+            elif terrain == "sand" and self.img_tile_sand:
+                img = self.img_tile_sand
+            elif terrain == "water" and self.img_tile_water:
+                img = self.img_tile_water
+            elif terrain == "rock" and self.img_tile_rock:
+                img = self.img_tile_rock
+            elif terrain == "dirt" and self.img_tile_dirt:
+                img = self.img_tile_dirt
+
+            if img is not None:
+                # Scale texture to current tile size so it zooms with the camera
+                scaled = pygame.transform.smoothscale(img, (ts, ts))
+                rect = scaled.get_rect(center=(screen_x, screen_y))
+                self.screen.blit(scaled, rect)
+            else:
+                color = self._get_tile_color(terrain)
+                rect = pygame.Rect(screen_x - ts // 2, screen_y - ts // 2, ts, ts)
+                pygame.draw.rect(self.screen, color, rect)
+                pygame.draw.rect(self.screen, (0, 0, 0), rect, 1)  # Border
     
     def _draw_task_destinations(self):
         """Draw visual indicators for task destinations (where agents are going)."""
@@ -520,6 +636,8 @@ class VisualGame:
     def _draw_agents(self):
         """Draw all agents on the map. Uses smooth visual position when agent is walking."""
         state = self.game.get_state()
+        # Reset sprite rects each frame before drawing
+        self.agent_sprite_rects.clear()
         for agent in state.agents:
             agent_id = agent.get("id")
             status = agent.get("status", "active")
@@ -535,38 +653,49 @@ class VisualGame:
                 x, y = float(loc[0]), float(loc[1])
             screen_x, screen_y = self._world_to_screen(x, y)
             
-            # Grey out dead agents
-            if status == "dead":
-                color = (100, 100, 100)  # Grey for dead agents
-                border_color = (60, 60, 60)  # Darker grey border
-                text_color = (150, 150, 150)  # Grey text
+            # Choose sprite if available; fall back to circles if not
+            img = None
+            if status == "dead" and self.img_agent_dead:
+                img = self.img_agent_dead
+            elif status != "dead" and self.img_agent_idle:
+                # Simple: always use idle sprite for now
+                img = self.img_agent_idle
+
+            if img is not None:
+                # Scale agent sprite with zoom so it stays proportional to tiles
+                ts = int(self._get_scaled_tile_size())
+                size = max(16, int(ts * 0.9))  # slightly smaller than full tile
+                scaled = pygame.transform.smoothscale(img, (size, size))
+                rect = scaled.get_rect(center=(screen_x, screen_y))
+                self.screen.blit(scaled, rect)
+                # Store rect for hit-testing (hitbox = sprite bounds)
+                if agent_id is not None:
+                    self.agent_sprite_rects[agent_id] = rect
+                # Optional: highlight selected agent with a ring
+                if self.selected_agent_id == agent.get("id") and status != "dead":
+                    pygame.draw.circle(self.screen, (255, 255, 0), (screen_x, screen_y), rect.width // 2 + 4, 2)
             else:
-                # Determine color based on health for living agents
-                oxygen = agent.get("oxygen", 100.0)
-                integrity = agent.get("integrity", 100.0)
-                avg_health = (oxygen + integrity) / 2.0
-                
-                if avg_health < 30:
-                    color = COLOR_AGENT_LOW_HEALTH
+                # Fallback: original circle-based rendering
+                if status == "dead":
+                    color = (100, 100, 100)  # Grey for dead agents
+                    border_color = (60, 60, 60)  # Darker grey border
+                    text_color = (150, 150, 150)  # Grey text
                 else:
-                    color = COLOR_AGENT
-                border_color = (0, 0, 0)  # Black border for living agents
-                text_color = COLOR_TEXT
-            
-            # Draw agent circle (scale with zoom)
-            radius = max(4, int(self._get_scaled_tile_size() // 3))
-            pygame.draw.circle(self.screen, color, (screen_x, screen_y), radius)
-            pygame.draw.circle(self.screen, border_color, (screen_x, screen_y), radius, 2)
-            
-            # Draw agent ID/name
-            agent_id = agent.get("id", "?")
-            text = self.font_small.render(str(agent_id), True, text_color)
-            text_rect = text.get_rect(center=(screen_x, screen_y))
-            self.screen.blit(text, text_rect)
-            
-            # Highlight selected agent (only if alive)
-            if self.selected_agent_id == agent.get("id") and status != "dead":
-                pygame.draw.circle(self.screen, (255, 255, 0), (screen_x, screen_y), radius + 4, 3)
+                    oxygen = agent.get("oxygen", 100.0)
+                    integrity = agent.get("integrity", 100.0)
+                    avg_health = (oxygen + integrity) / 2.0
+                    color = COLOR_AGENT_LOW_HEALTH if avg_health < 30 else COLOR_AGENT
+                    border_color = (0, 0, 0)
+                    text_color = COLOR_TEXT
+                radius = max(4, int(self._get_scaled_tile_size() // 3))
+                pygame.draw.circle(self.screen, color, (screen_x, screen_y), radius)
+                pygame.draw.circle(self.screen, border_color, (screen_x, screen_y), radius, 2)
+                agent_id_display = agent.get("id", "?")
+                text = self.font_small.render(str(agent_id_display), True, text_color)
+                text_rect = text.get_rect(center=(screen_x, screen_y))
+                self.screen.blit(text, text_rect)
+                if self.selected_agent_id == agent.get("id") and status != "dead":
+                    pygame.draw.circle(self.screen, (255, 255, 0), (screen_x, screen_y), radius + 4, 3)
     
     def _draw_drag_preview(self):
         """Draw line from agent to cursor when dragging to assign destination."""
@@ -1031,19 +1160,21 @@ class VisualGame:
                     elif hasattr(self, 'recruit_button_rect') and self.recruit_button_rect.collidepoint(mouse_pos):
                         self._recruit_agent()
                 
-                # Check if click is in game area (use tile under cursor so target matches what user sees)
+                # Check if click is in game area
                 if mouse_x < self.camera_width:
-                    world_x, world_y = self._screen_to_world_tile(mouse_x, mouse_y)
-                    
                     if event.button == 1:  # Left click - select or start drag
-                        agent_here = self._get_agent_id_at(world_x, world_y)
+                        # First, hit-test against sprite rects in screen space so hitbox matches PNG
+                        agent_here = self._get_agent_id_at_screen(mouse_x, mouse_y)
                         if agent_here is not None:
                             self.drag_agent_id = agent_here
                             self.drag_start_screen = (mouse_x, mouse_y)
                             self.selected_agent_id = agent_here
                         else:
+                            # Fallback to tile-based selection for keyboard/edge cases
+                            world_x, world_y = self._screen_to_world_tile(mouse_x, mouse_y)
                             self._select_agent_at(world_x, world_y)
                     elif event.button == 3:  # Right click - assign task
+                        world_x, world_y = self._screen_to_world_tile(mouse_x, mouse_y)
                         if self.selected_agent_id is not None:
                             self._assign_task_at(world_x, world_y)
             
@@ -1181,27 +1312,17 @@ class VisualGame:
         prompt = self.font.render("Press any key or click to return to the main menu.", True, (200, 200, 220))
         self.screen.blit(prompt, prompt.get_rect(center=(WINDOW_WIDTH // 2, WINDOW_HEIGHT - 120)))
     
-    def _get_agent_id_at(self, world_x: int, world_y: int) -> Optional[int]:
-        """Return agent id at world coordinates, or None, using a tighter circular hitbox. Skips dead agents."""
+    def _get_agent_id_at_screen(self, screen_x: int, screen_y: int) -> Optional[int]:
+        """Return agent id at screen coordinates if the click intersects the drawn sprite rect."""
         if not self.game:
             return None
         state = self.game.get_state()
-        for agent in state.agents:
-            # Skip dead agents
-            if agent.get("status") == "dead":
+        for agent_id, rect in self.agent_sprite_rects.items():
+            # Only consider living agents
+            agent = state.get_agent_by_id(agent_id)
+            if not agent or agent.get("status") == "dead":
                 continue
-            agent_id = agent.get("id")
-            if agent_id in self.agent_visual_pos:
-                ax, ay = self.agent_visual_pos[agent_id]
-            else:
-                loc = agent.get("location")
-                if not loc or not isinstance(loc, (tuple, list)) or len(loc) != 2:
-                    continue
-                ax, ay = float(loc[0]), float(loc[1])
-            # Tighter circular hitbox: within ~0.75 tiles of the agent
-            dx = ax - float(world_x)
-            dy = ay - float(world_y)
-            if dx * dx + dy * dy <= 0.75 * 0.75:
+            if rect.collidepoint(screen_x, screen_y):
                 return agent_id
         return None
     
@@ -1797,33 +1918,42 @@ class VisualGame:
             tiles = station.get_tiles()
             if not tiles:
                 continue
-            
-            # Get station color based on type
-            if station.station_type == STATION_OXYGEN:
-                color = COLOR_STATION_OXYGEN
-            elif station.station_type == STATION_CALORIES:
-                color = COLOR_STATION_CALORIES
+
+            # Prefer textured buildings if available
+            img = None
+            if station.station_type == STATION_OXYGEN and self.img_station_oxygen:
+                img = self.img_station_oxygen
+            elif station.station_type == STATION_CALORIES and self.img_station_calories:
+                img = self.img_station_calories
+            elif station.station_type == STATION_INTEGRITY and self.img_station_integrity:
+                img = self.img_station_integrity
+
+            if img is not None:
+                center_screen_x, center_screen_y = self._world_to_screen(station.center_x, station.center_y)
+                margin = ts * 2  # Ensure visible when near screen
+                if -margin <= center_screen_x <= self.camera_width + margin and -margin <= center_screen_y <= self.camera_height + margin:
+                    # Scale building based on zoom (proportional to tile size)
+                    scale_factor = self._get_scaled_tile_size() / TILE_SIZE
+                    new_w = max(1, int(img.get_width() * scale_factor))
+                    new_h = max(1, int(img.get_height() * scale_factor))
+                    scaled = pygame.transform.smoothscale(img, (new_w, new_h))
+                    rect = scaled.get_rect(center=(center_screen_x, center_screen_y))
+                    self.screen.blit(scaled, rect)
             else:
-                color = COLOR_STATION_INTEGRITY
-            
-            # Draw station tiles (completely cover terrain underneath)
-            for x, y in tiles:
-                if WORLD_MIN_X <= x < WORLD_MAX_X and WORLD_MIN_Y <= y < WORLD_MAX_Y:
-                    screen_x, screen_y = self._world_to_screen(x, y)
-                    if -ts <= screen_x <= self.camera_width + ts and -ts <= screen_y <= self.camera_height + ts:
-                        rect = pygame.Rect(screen_x - ts // 2, screen_y - ts // 2, ts, ts)
-                        # Draw solid filled rectangle to completely cover terrain
-                        pygame.draw.rect(self.screen, color, rect)
-                        pygame.draw.rect(self.screen, (0, 0, 0), rect, 2)
-            
-            # Draw station center marker (generous visibility check for zoom)
-            center_screen_x, center_screen_y = self._world_to_screen(station.center_x, station.center_y)
-            margin = ts * 2  # Ensure icon visible when station tiles are on screen
-            if -margin <= center_screen_x <= self.camera_width + margin and -margin <= center_screen_y <= self.camera_height + margin:
-                icon_text = "O" if station.station_type == STATION_OXYGEN else ("C" if station.station_type == STATION_CALORIES else "R")
-                icon = self.font.render(icon_text, True, (255, 255, 255))
-                icon_rect = icon.get_rect(center=(center_screen_x, center_screen_y))
-                self.screen.blit(icon, icon_rect)
+                # Fallback: colored rectangles as before
+                if station.station_type == STATION_OXYGEN:
+                    color = COLOR_STATION_OXYGEN
+                elif station.station_type == STATION_CALORIES:
+                    color = COLOR_STATION_CALORIES
+                else:
+                    color = COLOR_STATION_INTEGRITY
+                for x, y in tiles:
+                    if WORLD_MIN_X <= x < WORLD_MAX_X and WORLD_MIN_Y <= y < WORLD_MAX_Y:
+                        screen_x, screen_y = self._world_to_screen(x, y)
+                        if -ts <= screen_x <= self.camera_width + ts and -ts <= screen_y <= self.camera_height + ts:
+                            rect = pygame.Rect(screen_x - ts // 2, screen_y - ts // 2, ts, ts)
+                            pygame.draw.rect(self.screen, color, rect)
+                            pygame.draw.rect(self.screen, (0, 0, 0), rect, 2)
     
     def _get_station_at(self, world_x: int, world_y: int) -> Optional[ResourceStation]:
         """Get station at world coordinates."""
@@ -1841,7 +1971,7 @@ class VisualGame:
         return None
     
     def _draw_powerups(self):
-        """Draw powerup pickups on the map with simple icons (O=oxygen, C=calories, R=integrity)."""
+        """Draw powerup pickups on the map using textures when available."""
         ts = int(self._get_scaled_tile_size())
         for p in self.powerups:
             if not (WORLD_MIN_X <= p.x < WORLD_MAX_X and WORLD_MIN_Y <= p.y < WORLD_MAX_Y):
@@ -1849,21 +1979,37 @@ class VisualGame:
             screen_x, screen_y = self._world_to_screen(p.x, p.y)
             if -ts > screen_x or screen_x > self.camera_width + ts or -ts > screen_y or screen_y > self.camera_height + ts:
                 continue
-            radius = max(6, ts // 3)
-            if p.powerup_type == POWERUP_AUTO_OXYGEN:
-                color = COLOR_STATION_OXYGEN
-                icon = "O"
-            elif p.powerup_type == POWERUP_AUTO_CALORIES:
-                color = COLOR_STATION_CALORIES
-                icon = "C"
+
+            img = None
+            if p.powerup_type == POWERUP_AUTO_OXYGEN and self.img_powerup_o2:
+                img = self.img_powerup_o2
+            elif p.powerup_type == POWERUP_AUTO_CALORIES and self.img_powerup_cal:
+                img = self.img_powerup_cal
+            elif p.powerup_type == POWERUP_AUTO_INTEGRITY and self.img_powerup_int:
+                img = self.img_powerup_int
+
+            if img is not None:
+                size = max(16, int(ts * 0.8))
+                scaled = pygame.transform.smoothscale(img, (size, size))
+                rect = scaled.get_rect(center=(screen_x, screen_y))
+                self.screen.blit(scaled, rect)
             else:
-                color = COLOR_STATION_INTEGRITY
-                icon = "R"
-            pygame.draw.circle(self.screen, color, (screen_x, screen_y), radius)
-            pygame.draw.circle(self.screen, (255, 255, 255), (screen_x, screen_y), radius, 2)
-            text = self.font_small.render(icon, True, (255, 255, 255))
-            text_rect = text.get_rect(center=(screen_x, screen_y))
-            self.screen.blit(text, text_rect)
+                # Fallback: colored circles with letters
+                radius = max(6, ts // 3)
+                if p.powerup_type == POWERUP_AUTO_OXYGEN:
+                    color = COLOR_STATION_OXYGEN
+                    icon = "O"
+                elif p.powerup_type == POWERUP_AUTO_CALORIES:
+                    color = COLOR_STATION_CALORIES
+                    icon = "C"
+                else:
+                    color = COLOR_STATION_INTEGRITY
+                    icon = "R"
+                pygame.draw.circle(self.screen, color, (screen_x, screen_y), radius)
+                pygame.draw.circle(self.screen, (255, 255, 255), (screen_x, screen_y), radius, 2)
+                text = self.font_small.render(icon, True, (255, 255, 255))
+                text_rect = text.get_rect(center=(screen_x, screen_y))
+                self.screen.blit(text, text_rect)
     
     def _draw_setup(self):
         """Draw new game setup screen (starting agent count)."""

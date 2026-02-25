@@ -100,11 +100,30 @@
       - Define conditions to advance stage (e.g., survive N turns, reach resource thresholds, or complete objectives).
       - On stage advance: increment `current_stage`, potentially adjust `world_seed`/difficulty, and re-place stations; show UI feedback (“Stage 2”, “Stage 3”, etc.).
 
-- **Graphics & presentation**
-  - Move from simple shapes to a **consistent pixel-art style**:
-    - Decide tile/sprite resolution (e.g., 16×16 or 32×32), palette, and asset list (terrain, agents, stations, UI icons).
-    - Integrate artist-created or AI-assisted sprites and replace rectangle-based drawing in `visual_game.py`.
-    - Keep resource colors and station icons consistent with current design to preserve readability.
+- **Graphics & presentation – Alpha → Beta plan**
+  - **Main menu polish**
+    - Redesign the main menu as a **full-screen scene** rather than a plain list:
+      - Add a subtle animated background (slowly panning colony view or parallax stars).
+      - Center the title and subtitle with a consistent font hierarchy and spacing.
+      - Restyle buttons (`New Game`, `Options`, `Quit`) with hover states, icons, and clearer padding.
+    - Add a small **“Alpha/Beta build” tag** and version/date in a corner for clarity during development.
+  - **Agent visuals**
+    - Move agents from colored circles to **textured sprites**:
+      - Choose a sprite resolution (e.g., 32×32) and decide on a simple pixel-art style.
+      - Define a minimal sprite sheet for agents: idle, walking (2–4 frames), and dead/ghosted.
+      - Update `visual_game.py` to load and draw sprites instead of circles, while preserving status coloring (e.g., tint or outline for low health/dead).
+    - Optionally add **small overlays** (O2/Cal/Int icons or powerup badges) above/beside agents for at-a-glance status.
+  - **Resource building visuals**
+    - Replace solid-colored station tiles with **textured buildings**:
+      - Create 3 building sprites (O2, Calories, Integrity) with subtle animation (e.g., blinking lights, pulsing resource icon).
+      - Ensure footprints line up with the existing tile grid (2×2 / 3×3) so collisions and visuals stay in sync.
+      - Update `_draw_resource_stations` to draw building sprites and icon overlays rather than raw rectangles.
+    - Keep the **O/C/R color language** consistent in signage or highlights on each building.
+  - **Global art direction**
+    - Lock in:
+      - **Resolution** (e.g., 16×16 or 32×32 tiles) and camera zoom defaults.
+      - A limited **color palette** for terrain, agents, UI, and structures so everything feels cohesive.
+    - Create a short **art style guide** in `docs/` (palette, examples, do/don’t) to keep future additions consistent.
 
 - **Powerup system evolution**
   - Generalize beyond the initial three auto-walk powerups:
@@ -134,4 +153,33 @@
   - Polish **input feel**: fix tile targeting and agent hitboxes so selecting/dragging feels precise.
   - Implement basic **stage progression** with visible feedback and possibly difficulty ramp.
   - Complete the **README checkpoint evidence** and add a short, rubric-aligned description per module.
+
+---
+
+### Longer-Term Feature Plan – Stages & Multi-Map Campaign
+
+- **Stage structure (per map)**
+  - Define a **Stage spec** (in code + docs) with:
+    - Map seed / layout parameters.
+    - Initial resources and agent loadout.
+    - One or more **objectives** (e.g., “stabilize oxygen above 60% for 5 turns”, “repair 3 damaged modules”, “survive N turns”).
+  - Add in-game UI to display current **stage name**, objectives, and progress (e.g., a small panel in the sidebar).
+
+- **Stage progression within a run**
+  - Implement a **stage controller** that:
+    - Checks when stage objectives are satisfied.
+    - Triggers transition to the **next stage**:
+      - Increment `current_stage`.
+      - Optionally modify difficulty (decay rate, Director algorithm/depth, event severity).
+      - Reset or partially carry over resources/agents (define rules in spec).
+  - Show a **Stage Complete** screen between stages with a short summary and “Continue” prompt.
+
+- **Multi-map campaign and final encounter**
+  - Plan a sequence of **increasingly difficult stages/maps** (e.g., 3–5 stages per run) with:
+    - Different terrain seeds and station placements.
+    - Escalating Director behavior (e.g., from heuristic to deeper Minimax/Alpha-Beta).
+  - Design a final “boss” stage:
+    - Stronger or scripted event patterns from the Director.
+    - Unique objectives (e.g., hold integrity above a threshold while enduring a series of severe events).
+  - Persist minimal **campaign state** (e.g., cumulative score, surviving agents, critical scars to infrastructure) between stages to give a sense of progression and stakes.
 

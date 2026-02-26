@@ -13,13 +13,14 @@
 - **Engine & integration**
   - **`GameEngine`** orchestrates the 4-phase turn cycle: Logic → Planning → Adversarial → Resolution.
   - Shared `ColonyState` is the single source of truth for all modules; engine exposes `get_state()` and `is_game_over()`.
-  - **Game-over conditions**: now correctly treat **no agents**, **all agents dead**, or **colony integrity ≤ 0** as terminal.
+  - Added explicit phase helpers in `GameEngine` (`run_logic_phase`, `run_planning_phase`, `run_adversarial_phase`, `run_resolution_phase`); `execute_turn(...)` is now a thin, well-documented wrapper that matches the README’s four-phase spec.
+  - **Game-over conditions**: now correctly treat **no agents** or **all agents dead** as terminal. Colony integrity can drop to 0 (rules still fire), but play continues as long as at least one agent is alive.
 
 - **Visual game (`visual_game.py`)**
   - Top-down, tile-based Pygame front-end with:
-    - Camera movement and zoom.
-    - Procedural terrain rendering (grass, sand, water, rock, dirt) using `procedural_tiles`.
-    - Agents drawn with smooth, frame-based path-following (paths derived from the planner).
+  - Camera movement and zoom; tile scaling and placement were adjusted to remove visible seams/gridlines at different zoom levels.
+  - Procedural terrain generation (grass, sand, water, rock, dirt) using `procedural_tiles`, now rendered with textured tiles from `assets/tiles`.
+  - Agents drawn as sprites (with a dedicated `agent_dead` sprite) and smooth, frame-based path-following (paths derived from the planner). Dead agents remain on the map at their last location with a distinct dead sprite and cannot be commanded.
     - Sidebar HUD for average resources, per-agent O2/Cal/Int bars, status, location, and active tasks.
   - **Menus & options**
     - Main menu with New Game / Options / Quit.
@@ -61,23 +62,24 @@
       - Clear an auto-target if no path exists or once the targeted resource has been restored at its station.
 
 - **Game-over clarity**
-  - `GameEngine.is_game_over()` matches its docstring:
-    - True if: no agents, all agents dead, or colony integrity ≤ 0.
+  - `GameEngine.is_game_over()` matches design intent:
+    - True if: no agents or all agents have `status == "dead"`.
+    - Integrity reaching 0% is still tracked and rendered as a catastrophic state, but it no longer ends the game by itself.
   - `visual_game.py`:
-    - Displays specific messages:
-      - “GAME OVER – All agents have died”
-      - “GAME OVER – Colony destroyed”
-      - Fallback “GAME OVER – Colony failed”
-    - Waits briefly and then returns to the main menu.
+    - Shows a dedicated **Game Over** screen with a clear reason:
+      - “All agents have died. There is no one left to respond to disasters.” (no living agents remain)
+      - Generic failure message if the colony can no longer meaningfully operate.
+    - Returns to the main menu after the player acknowledges the Game Over screen.
 
 - **Tests & repo organization**
   - **Unit tests** for each module in `unit_tests/` (e.g., `test_module1_state.py`, `test_module2_search.py`, etc.).
   - **Integration tests** in `integration_tests/` demonstrating module interactions (e.g., search with state, events with state).
-  - Repo layout, `AGENTS.md`, `README.md`, and `.claude` skill follow the course’s required structure.
+  - The unified test runner `run_tests.py` currently executes **67 tests across modules 1–6 with 0 failures**, including updated RuleEngine tests that assert the new “death = status == 'dead', agent remains in list” behavior.
+  - Repo layout, `AGENTS.md`, `README.md`, and `.claude` skill follow the course’s required structure, and `.gitignore` has been tightened to exclude `__pycache__/` and `*.pyc` for cleaner source control.
 
 ---
 
-### What Still Needs to Be Done
+### What Still Needs to Be Done (Next Steps)
 
 - **Documentation & checkpoints**
   - Update the **Checkpoint Log** in `README.md` with:
@@ -90,15 +92,15 @@
     - How the heuristic survival assessment in Module 6 works (and how it could be swapped for RL).
 
 - **Gameplay polish & UX**
-  - **Tile targeting & selection precision**:
-    - Improve `_screen_to_world` rounding so drag destinations and clicks land on the intuitive tile under the cursor.
-    - Tighten **agent hitboxes** in `_get_agent_id_at` / `_select_agent_at` (e.g., reduce the current “within ~1–1.5 tiles” radius) so selection feels less “generous” and more precise.
+  - **Selection & targeting feel**:
+    - Tile selection and drag destinations now use consistent world/screen rounding and grid-aligned tiles; visible gaps are fixed, but we can still experiment with hover highlights or cursor feedback for even clearer targeting.
+    - Agent selection uses sprite-aligned hitboxes (based on last-drawn rects) instead of a loose radius; this feels much more precise, but we may still want visual cues (e.g., hover outline) in a future polish pass.
   - **ESC to menu**:
-    - Optionally add a confirmation step (“Press ESC again to quit to menu”) to reduce accidental exits.
+    - Optionally add a confirmation step (“Press ESC again to quit to menu”) to reduce accidental exits from an in-progress run.
   - **Stage system** (partially in place):
     - `current_stage` and stage-aware station placement exist, but there is no visible “stage progression” yet.
-      - Define conditions to advance stage (e.g., survive N turns, reach resource thresholds, or complete objectives).
-      - On stage advance: increment `current_stage`, potentially adjust `world_seed`/difficulty, and re-place stations; show UI feedback (“Stage 2”, “Stage 3”, etc.).
+    - Define conditions to advance stage (e.g., survive N turns, reach resource thresholds, or complete objectives).
+    - On stage advance: increment `current_stage`, potentially adjust `world_seed`/difficulty, and re-place stations; show UI feedback (“Stage 2”, “Stage 3”, etc.).
 
 - **Graphics & presentation – Alpha → Beta plan**
   - **Main menu polish**

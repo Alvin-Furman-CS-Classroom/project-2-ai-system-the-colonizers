@@ -148,12 +148,12 @@ class RuleEngine:
                 colony_state.resources["integrity"] = 0
                 v.applied = True
 
-        # Apply deaths in reverse index order so indices remain valid
+        # Apply deaths by marking agents dead (they stay on the map)
         death_violations = [v for v in violations if v.consequence == CONSEQUENCE_DEATH and v.agent_id is not None]
-        for v in sorted(death_violations, key=lambda x: x.agent_id, reverse=True):
+        for v in death_violations:
             if v.applied:
                 continue
-            colony_state.remove_agent(v.agent_id)
+            colony_state.update_agent(v.agent_id, {"status": "dead"}, validate=False)
             v.applied = True
 
     def evaluate_state(self, colony_state: ColonyState) -> Dict[str, Any]:
@@ -178,3 +178,4 @@ class RuleEngine:
             ],
             "state_after": colony_state.to_dict(),
         }
+        

@@ -534,7 +534,7 @@ class VisualGame:
         return TILE_SIZE * self.zoom_level
     
     def _world_to_screen(self, world_x: int, world_y: int) -> Tuple[int, int]:
-        """Convert world coordinates to screen coordinates."""
+        """Convert world coordinates to screen coordinates (tile center)."""
         ts = self._get_scaled_tile_size()
         screen_x = (world_x - self.camera_x) * ts + self.camera_width // 2
         screen_y = (world_y - self.camera_y) * ts + self.camera_height // 2
@@ -547,13 +547,24 @@ class VisualGame:
         world_y = (screen_y - self.camera_height // 2) / ts + self.camera_y
         return round(world_x), round(world_y)
     
+    def _get_tile_screen_rect(self, world_x: int, world_y: int) -> Tuple[int, int, int, int]:
+        """Return (left, top, width, height) for the tile at world (world_x, world_y) using a
+        grid-aligned layout so adjacent tiles share edges with no gaps or overlaps (avoids
+        visible grid lines when zooming). Uses integer tile size and a single origin per frame."""
+        ts_f = self._get_scaled_tile_size()
+        ts_int = int(round(ts_f))
+        origin_left = (0 - self.camera_x) * ts_f + self.camera_width // 2 - ts_int / 2
+        origin_top = (0 - self.camera_y) * ts_f + self.camera_height // 2 - ts_int / 2
+        left = int(origin_left) + world_x * ts_int
+        top = int(origin_top) + world_y * ts_int
+        return left, top, ts_int, ts_int
+    
     def _draw_tile(self, x: int, y: int, terrain: str):
-        """Draw a single tile at world coordinates."""
-        screen_x, screen_y = self._world_to_screen(x, y)
-        ts = int(self._get_scaled_tile_size())
+        """Draw a single tile at world coordinates. Uses grid-aligned rect to avoid seam lines when zooming."""
+        left, top, ts, _ = self._get_tile_screen_rect(x, y)
         
         # Only draw if tile is visible
-        if -ts <= screen_x <= self.camera_width + ts and -ts <= screen_y <= self.camera_height + ts:
+        if -ts <= left <= self.camera_width + ts and -ts <= top <= self.camera_height + ts:
             # Prefer textured tiles if available, fall back to solid colors otherwise
             img = None
             if terrain == "grass" and self.img_tile_grass:
@@ -570,11 +581,11 @@ class VisualGame:
             if img is not None:
                 # Scale texture to current tile size so it zooms with the camera
                 scaled = pygame.transform.smoothscale(img, (ts, ts))
-                rect = scaled.get_rect(center=(screen_x, screen_y))
+                rect = pygame.Rect(left, top, ts, ts)
                 self.screen.blit(scaled, rect)
             else:
                 color = self._get_tile_color(terrain)
-                rect = pygame.Rect(screen_x - ts // 2, screen_y - ts // 2, ts, ts)
+                rect = pygame.Rect(left, top, ts, ts)
                 pygame.draw.rect(self.screen, color, rect)
                 pygame.draw.rect(self.screen, (0, 0, 0), rect, 1)  # Border
     
@@ -1689,8 +1700,6 @@ class VisualGame:
                 living = [a for a in state.agents if a.get("status") != "dead"]
                 if not living and state.agents:
                     self.last_game_over_reason = "All agents have died. There is no one left to respond to disasters."
-                elif state.resources.get("integrity", 100.0) <= 0:
-                    self.last_game_over_reason = "Colony integrity reached 0%. The habitat has failed catastrophically."
                 else:
                     self.last_game_over_reason = "The colony can no longer continue operating."
                 # Switch to a dedicated Game Over screen instead of jumping straight to menu

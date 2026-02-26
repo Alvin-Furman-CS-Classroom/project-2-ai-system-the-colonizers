@@ -76,12 +76,44 @@ This will run a simple demonstration showing the game engine executing several t
 
 ### Run individual modules:
 
-Each module can be imported and used independently:
+Each module can be imported and used independently. For example, this snippet
+shows the full four-phase flow without the visual UI:
 
 ```python
 from src.module1_state.colony_state import ColonyState
-from src.module2_search.task_planner import TaskPlanner
-# etc.
+from src.module2_search.task_planner import Task
+from src.module3_logic.rule_engine import RuleEngine
+from src.module4_game_theory.ai_director import AIDirector
+from src.module5_events.event_resolver import EventResolver
+from src.module6_rl.survival_assessor import SurvivalAssessor
+from src.game_engine import GameEngine
+
+# Create initial state (normally produced by the previous turn)
+state = ColonyState()
+
+# Set up engine (wires modules 1–6 together)
+engine = GameEngine(initial_state=state)
+
+# Example: one player task at (0, 0)
+tasks = [
+    Task(
+        task_id=\"task_0_0_0\",
+        location=(0, 0),
+        requirements={},
+        priority=5,
+        estimated_duration=1,
+    )
+]
+
+# Execute a single turn through Logic → Planning → Adversarial → Resolution
+turn_report = engine.execute_turn(player_tasks=tasks, algorithm=\"astar\")
+
+print(\"Turn:\", turn_report[\"turn_number\"])
+print(\"Logic phase:\", turn_report[\"phases\"][\"logic\"])
+print(\"Planning phase:\", turn_report[\"phases\"][\"planning\"])
+print(\"Adversarial phase:\", turn_report[\"phases\"][\"adversarial\"])
+print(\"Resolution phase:\", turn_report[\"phases\"][\"resolution\"])
+print(\"Survival assessment:\", turn_report[\"survival_assessment\"])
 ```
 
 ## Testing

@@ -73,90 +73,161 @@ class GameEngine:
             ),
         ]
     
-    def execute_turn(self, player_tasks: list[Task] = None, algorithm: str = "astar") -> Dict[str, Any]:
+    def run_logic_phase(self) -> Dict[str, Any]:
         """
-        Execute one complete turn through all four phases.
-        
-        Args:
-            player_tasks: Tasks assigned by player (optional)
-            algorithm: Algorithm to use for task planning ("astar", "beam_search", "idastar")
-            
+        Run the **Logic phase** (Module 3: `RuleEngine`) on the current state.
+
         Returns:
-            Turn report with results from each phase
+            Dictionary report from `RuleEngine.evaluate_state`, including any
+            violations found and consequences that were applied.
         """
-        turn_report = {
-            "turn_number": self.state.turn_number,
-            "phases": {}
+        return self.rule_engine.evaluate_state(self.state)
+
+    def run_planning_phase(
+        self, player_tasks: list[Task] | None, algorithm: str = "astar"
+    ) -> Dict[str, Any]:
+        """
+        Run the **Planning phase** (Module 2: `TaskPlanner`) for a set of tasks.
+
+        Args:
+            player_tasks: Tasks assigned by the player; if None or empty, no planning is performed.
+            algorithm: Which search algorithm to use for task sequencing:
+                - \"astar\" (default)
+                - \"beam_search\"
+                - \"idastar\" (uses A* for sequencing, IDA* only for pathfinding)
+
+        Returns:
+            Dictionary with a summary of task assignments, suitable for UI consumption:
+            - \"tasks_assigned\": int
+            - \"assignments\": list of dicts with task_id, agent_id, completion_time, path_coords, task_location
+        """
+        if not player_tasks:
+            return {"tasks_assigned": 0}
+
+        if algorithm == "beam_search":
+            task_assignments = self.task_planner.plan_with_beam_search(player_tasks, beam_width=3)
+        elif algorithm == "idastar":
+            # IDA* is for pathfinding; task sequencing still uses A*
+            task_assignments = self.task_planner.plan_with_astar(player_tasks)
+        else:  # astar (default)
+            task_assignments = self.task_planner.plan_with_astar(player_tasks)
+
+        # Build path coordinates for each assignment (for visual walking, not teleporting)
+        graph = self.task_planner.graph
+        assignments_data = []
+        for a in task_assignments:
+            path_coords: List[Tuple[int, int]] = []
+            for node_id in (a.path or []):
+                pos = graph.node_positions.get(node_id)
+                if pos is not None:
+                    path_coords.append(tuple(pos))
+            # Ensure destination is included (path may end at a graph node near task)
+            dest = a.task.location
+            if path_coords and path_coords[-1] != dest:
+                path_coords.append(dest)
+            elif not path_coords:
+                path_coords = [dest]
+            assignments_data.append({
+                "task_id": a.task.task_id,
+                "agent_id": a.agent_id,
+                "completion_time": a.completion_time,
+                "path_coords": path_coords,
+                "task_location": dest,
+            })
+
+        return {
+            "tasks_assigned": len(task_assignments),
+            "assignments": assignments_data,
         }
-        
-        # Phase 1: Logic - Rule Enforcement
-        logic_result = self.rule_engine.evaluate_state(self.state)
-        turn_report["phases"]["logic"] = logic_result
-        
-        # Phase 2: Planning - Task Optimization
-        if player_tasks:
-            if algorithm == "beam_search":
-                task_assignments = self.task_planner.plan_with_beam_search(player_tasks, beam_width=3)
-            elif algorithm == "idastar":
-                # IDA* is for pathfinding, use A* for task sequencing
-                task_assignments = self.task_planner.plan_with_astar(player_tasks)
-            else:  # astar (default)
-                task_assignments = self.task_planner.plan_with_astar(player_tasks)
-            
-            # Build path coordinates for each assignment (for visual walking, not teleporting)
-            graph = self.task_planner.graph
-            assignments_data = []
-            for a in task_assignments:
-                path_coords: List[Tuple[int, int]] = []
-                for node_id in (a.path or []):
-                    pos = graph.node_positions.get(node_id)
-                    if pos is not None:
-                        path_coords.append(tuple(pos))
-                # Ensure destination is included (path may end at a graph node near task)
-                dest = a.task.location
-                if path_coords and path_coords[-1] != dest:
-                    path_coords.append(dest)
-                elif not path_coords:
-                    path_coords = [dest]
-                assignments_data.append({
-                    "task_id": a.task.task_id,
-                    "agent_id": a.agent_id,
-                    "completion_time": a.completion_time,
-                    "path_coords": path_coords,
-                    "task_location": dest,
-                })
-            turn_report["phases"]["planning"] = {
-                "tasks_assigned": len(task_assignments),
-                "assignments": assignments_data
-            }
-            # Do NOT move agents here — visual game advances them along paths each turn
-        else:
-            turn_report["phases"]["planning"] = {"tasks_assigned": 0}
-        
-        # Phase 3: Adversarial - AI Event Selection
+
+    def run_adversarial_phase(self) -> Tuple[Event, Dict[str, Any]]:
+        """
+        Run the **Adversarial phase** (Module 4: `AIDirector`) on the current state.
+
+        Returns:
+            Tuple of:
+                - The selected `Event` instance.
+                - A small dictionary summary (type, location, severity) for reporting/visuals.
+        """
         selected_event = self.ai_director.select_event_minimax(self.state)
-        turn_report["phases"]["adversarial"] = {
+        summary = {
             "event_selected": selected_event.event_type,
             "location": selected_event.location,
-            "severity": selected_event.severity
+            "severity": selected_event.severity,
         }
-        
-        # Phase 4: Resolution - Resource Consumption & Event Application
+        return selected_event, summary
+
+    def run_resolution_phase(self, selected_event: Event) -> Dict[str, Any]:
+        """
+        Run the **Resolution phase** (Modules 1 and 5) on the current state.
+
+        This applies per-turn resource consumption and then applies the
+        selected event via the `EventResolver`.
+
+        Args:
+            selected_event: Event chosen by the AI Director in the Adversarial phase.
+
+        Returns:
+            Dictionary report from `EventResolver.apply_event`, including the
+            updated state snapshot and any cascading effects.
+        """
         # Apply resource consumption from agent activity
         base_consumption = {"oxygen": -5.0, "calories": -3.0}
         self.state.consume_resources(base_consumption)
-        
+
         # Apply selected event
-        event_result = self.event_resolver.apply_event(self.state, selected_event)
-        turn_report["phases"]["resolution"] = event_result
-        
-        # Survival Assessment
+        return self.event_resolver.apply_event(self.state, selected_event)
+
+    def execute_turn(self, player_tasks: list[Task] = None, algorithm: str = "astar") -> Dict[str, Any]:
+        """
+        Execute one complete turn through all four phases using the orchestration:
+        Logic → Planning → Adversarial → Resolution (+ Survival Assessment).
+
+        Args:
+            player_tasks: Tasks assigned by player (optional).
+            algorithm: Algorithm to use for task planning (\"astar\", \"beam_search\", \"idastar\").
+
+        Returns:
+            Turn report with results from each phase and a survival assessment, in the form:
+            {
+                \"turn_number\": int,
+                \"phases\": {
+                    \"logic\": {...},
+                    \"planning\": {...},
+                    \"adversarial\": {...},
+                    \"resolution\": {...},
+                },
+                \"survival_assessment\": {...},
+            }
+        """
+        turn_report: Dict[str, Any] = {
+            "turn_number": self.state.turn_number,
+            "phases": {},
+        }
+
+        # Phase 1: Logic - Rule Enforcement (Module 3)
+        logic_result = self.run_logic_phase()
+        turn_report["phases"]["logic"] = logic_result
+
+        # Phase 2: Planning - Task Optimization (Module 2)
+        planning_result = self.run_planning_phase(player_tasks, algorithm=algorithm)
+        turn_report["phases"]["planning"] = planning_result
+
+        # Phase 3: Adversarial - AI Event Selection (Module 4)
+        selected_event, adversarial_summary = self.run_adversarial_phase()
+        turn_report["phases"]["adversarial"] = adversarial_summary
+
+        # Phase 4: Resolution - Resource Consumption & Event Application (Modules 1 & 5)
+        resolution_result = self.run_resolution_phase(selected_event)
+        turn_report["phases"]["resolution"] = resolution_result
+
+        # Survival Assessment (Module 6)
         survival_assessment = self.survival_assessor.assess_survival(self.state)
         turn_report["survival_assessment"] = survival_assessment
-        
+
         # Advance to next turn
         self.state.next_turn()
-        
+
         return turn_report
     
     def _is_tile_passable(self, x: int, y: int, exclude_agent_id: Optional[int] = None) -> bool:
@@ -340,7 +411,7 @@ class GameEngine:
     
     def is_game_over(self) -> bool:
         """
-        Check if game is over (no agents, all agents dead, or colony destroyed).
+        Check if game is over (no agents or all agents dead).
         
         Returns:
             True if game should end
@@ -351,9 +422,6 @@ class GameEngine:
         # All agents dead (no living agents left)
         living = [a for a in self.state.agents if a.get("status") != "dead"]
         if not living:
-            return True
-        
-        if self.state.resources.get("integrity", 100.0) <= 0:
             return True
         
         return False

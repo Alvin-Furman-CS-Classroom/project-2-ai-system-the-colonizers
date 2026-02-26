@@ -2018,14 +2018,19 @@ class VisualGame:
         title_rect = title.get_rect(center=(WINDOW_WIDTH // 2, 120))
         self.screen.blit(title, title_rect)
         
-        # Starting agents selector
-        agents_text = self.font.render(f"Starting Agents: {self.starting_agents}", True, COLOR_TEXT)
-        agents_rect = agents_text.get_rect(center=(WINDOW_WIDTH // 2, 220))
-        self.screen.blit(agents_text, agents_rect)
+        # Starting agents selector — label on its own line, number + arrows below with clear spacing
+        label_text = self.font.render("Starting agents:", True, COLOR_TEXT)
+        label_rect = label_text.get_rect(center=(WINDOW_WIDTH // 2, 195))
+        self.screen.blit(label_text, label_rect)
         
-        # Left/Right arrows
-        left_rect = pygame.Rect(WINDOW_WIDTH // 2 - 120, 200, 50, 50)
-        right_rect = pygame.Rect(WINDOW_WIDTH // 2 + 70, 200, 50, 50)
+        # Number in center, arrows on either side (well separated from label and number)
+        number_text = self.font.render(str(self.starting_agents), True, COLOR_TEXT)
+        number_rect = number_text.get_rect(center=(WINDOW_WIDTH // 2, 260))
+        self.screen.blit(number_text, number_rect)
+        
+        # Left/Right arrows — below label, flanking the number with clear gap
+        left_rect = pygame.Rect(WINDOW_WIDTH // 2 - 130, 235, 50, 50)
+        right_rect = pygame.Rect(WINDOW_WIDTH // 2 + 80, 235, 50, 50)
         pygame.draw.rect(self.screen, COLOR_BUTTON, left_rect)
         pygame.draw.rect(self.screen, COLOR_BUTTON, right_rect)
         l_arrow = self.font.render("<", True, COLOR_TEXT)

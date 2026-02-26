@@ -31,6 +31,7 @@ TILE_SIZE = 32  # Size of each tile in pixels
 CAMERA_WIDTH = 800  # Width of game view
 CAMERA_HEIGHT = 600  # Height of game view
 SIDEBAR_WIDTH = 300  # Width of sidebar
+SIDEBAR_TAB_BAR_HEIGHT = 36  # Height of tab row (Colony | Agents | Tasks)
 WINDOW_WIDTH = CAMERA_WIDTH + SIDEBAR_WIDTH
 WINDOW_HEIGHT = CAMERA_HEIGHT
 TURN_INTERVAL_SECONDS = 8.0  # Seconds between automatic turns (slower for easier interaction)
@@ -239,6 +240,11 @@ class VisualGame:
         
         # Agent list scrolling
         self.agent_list_scroll = 0  # Scroll offset for agent list in sidebar
+        # Sidebar tab: "colony" | "agents" | "tasks"
+        self.sidebar_tab = "colony"
+        self.sidebar_tab_rects: List[pygame.Rect] = []  # Filled each frame for hit-test
+        # Agent under mouse (for hover highlight in sidebar and on map)
+        self.hovered_agent_id: Optional[int] = None
         
         # Stage index (0 = first stage). For stage-by-stage play: increment current_stage,
         # then set self.resource_stations = self._choose_station_placements(state, self.current_stage).
@@ -671,9 +677,12 @@ class VisualGame:
                 # Store rect for hit-testing (hitbox = sprite bounds)
                 if agent_id is not None:
                     self.agent_sprite_rects[agent_id] = rect
-                # Optional: highlight selected agent with a ring
-                if self.selected_agent_id == agent.get("id") and status != "dead":
-                    pygame.draw.circle(self.screen, (255, 255, 0), (screen_x, screen_y), rect.width // 2 + 4, 2)
+                # Hover and selected highlights
+                if status != "dead":
+                    if self.hovered_agent_id == agent_id:
+                        pygame.draw.circle(self.screen, (255, 255, 0), (screen_x, screen_y), rect.width // 2 + 5, 2)
+                    if self.selected_agent_id == agent.get("id"):
+                        pygame.draw.circle(self.screen, (255, 255, 0), (screen_x, screen_y), rect.width // 2 + 4, 2)
             else:
                 # Fallback: original circle-based rendering
                 if status == "dead":
@@ -694,8 +703,11 @@ class VisualGame:
                 text = self.font_small.render(str(agent_id_display), True, text_color)
                 text_rect = text.get_rect(center=(screen_x, screen_y))
                 self.screen.blit(text, text_rect)
-                if self.selected_agent_id == agent.get("id") and status != "dead":
-                    pygame.draw.circle(self.screen, (255, 255, 0), (screen_x, screen_y), radius + 4, 3)
+                if status != "dead":
+                    if self.hovered_agent_id == agent.get("id"):
+                        pygame.draw.circle(self.screen, (255, 255, 0), (screen_x, screen_y), radius + 5, 2)
+                    if self.selected_agent_id == agent.get("id"):
+                        pygame.draw.circle(self.screen, (255, 255, 0), (screen_x, screen_y), radius + 4, 3)
     
     def _draw_drag_preview(self):
         """Draw line from agent to cursor when dragging to assign destination."""
@@ -760,21 +772,8 @@ class VisualGame:
                                (0, screen_y), (self.camera_width, screen_y), 3)
     
     def _draw_sidebar(self):
-        """Draw the sidebar with agent status, resources, and tasks."""
+        """Draw the sidebar with tabs: Colony | Agents | Tasks."""
         sidebar_x = self.camera_width
-        
-        # Background
-        sidebar_rect = pygame.Rect(sidebar_x, 0, self.sidebar_width, self.window_height)
-        pygame.draw.rect(self.screen, COLOR_SIDEBAR_BG, sidebar_rect)
-        
-        y_offset = 20
-        
-        # Title
-        title = self.font.render("Colony Status", True, COLOR_TEXT)
-        self.screen.blit(title, (sidebar_x + 10, y_offset))
-        y_offset += 40
-        
-        # Resources (average of all agents)
         state = self.game.get_state()
         agents = [a for a in state.agents if a.get("status") != "dead"]
         if agents:
@@ -783,146 +782,204 @@ class VisualGame:
             avg_integrity = sum(a.get("integrity", 0) for a in agents) / len(agents)
         else:
             avg_oxygen = avg_calories = avg_integrity = 0.0
-        y_offset = self._draw_resource_bar(sidebar_x + 10, y_offset, "Oxygen", avg_oxygen, COLOR_RESOURCE_OXYGEN)
-        y_offset = self._draw_resource_bar(sidebar_x + 10, y_offset, "Calories", avg_calories, COLOR_RESOURCE_CALORIES)
-        y_offset = self._draw_resource_bar(sidebar_x + 10, y_offset, "Integrity", avg_integrity, COLOR_RESOURCE_INTEGRITY)
-        y_offset += 20
-        
-        # Turn number
-        turn_text = self.font.render(f"Turn: {state.turn_number}", True, COLOR_TEXT)
-        self.screen.blit(turn_text, (sidebar_x + 10, y_offset))
-        y_offset += 40
-        
-        # Agents list with scrolling
-        agents_title = self.font.render(f"Agents ({len(state.agents)}):", True, COLOR_TEXT)
-        self.screen.blit(agents_title, (sidebar_x + 10, y_offset))
-        y_offset += 30
-        
-        # Calculate visible agents (with scrolling)
-        agents_per_page = 4  # Number of agents visible at once
-        total_agents = len(state.agents)
-        max_scroll = max(0, total_agents - agents_per_page)
-        self.agent_list_scroll = max(0, min(self.agent_list_scroll, max_scroll))
-        
-        # Scroll buttons
-        if total_agents > agents_per_page:
-            scroll_up_rect = pygame.Rect(sidebar_x + self.sidebar_width - 30, y_offset, 25, 20)
-            scroll_down_rect = pygame.Rect(sidebar_x + self.sidebar_width - 30, y_offset + agents_per_page * 85, 25, 20)
-            self.agent_scroll_up_rect = scroll_up_rect
-            self.agent_scroll_down_rect = scroll_down_rect
-            
-            # Draw scroll buttons
-            up_color = COLOR_BUTTON if self.agent_list_scroll > 0 else (50, 50, 50)
-            down_color = COLOR_BUTTON if self.agent_list_scroll < max_scroll else (50, 50, 50)
-            pygame.draw.rect(self.screen, up_color, scroll_up_rect)
-            pygame.draw.rect(self.screen, down_color, scroll_down_rect)
-            pygame.draw.polygon(self.screen, COLOR_TEXT, [
-                (scroll_up_rect.centerx, scroll_up_rect.top + 5),
-                (scroll_up_rect.left + 5, scroll_up_rect.bottom - 5),
-                (scroll_up_rect.right - 5, scroll_up_rect.bottom - 5)
-            ])
-            pygame.draw.polygon(self.screen, COLOR_TEXT, [
-                (scroll_down_rect.centerx, scroll_down_rect.bottom - 5),
-                (scroll_down_rect.left + 5, scroll_down_rect.top + 5),
-                (scroll_down_rect.right - 5, scroll_down_rect.top + 5)
-            ])
-        
-        # Display visible agents
-        visible_agents = state.agents[self.agent_list_scroll:self.agent_list_scroll + agents_per_page]
-        for agent in visible_agents:
-            agent_entry_start_y = y_offset  # Track where this agent entry starts
-            agent_id = agent.get("id", "?")
-            name = agent.get("name", "Unknown")
-            oxygen = agent.get("oxygen", 0)
-            calories = agent.get("calories", 0)
-            integrity = agent.get("integrity", 0)
-            status = agent.get("status", "active")
-            loc = agent.get("location", (0, 0))
-            
-            # Highlight selected agent with background
-            is_selected = (self.selected_agent_id == agent_id and status != "dead")
-            if is_selected:
-                # Draw highlight background for selected agent (entire entry)
-                highlight_rect = pygame.Rect(sidebar_x + 5, agent_entry_start_y - 5, self.sidebar_width - 10, 85)
-                pygame.draw.rect(self.screen, (60, 80, 100), highlight_rect)  # Dark blue highlight
-                pygame.draw.rect(self.screen, (255, 255, 0), highlight_rect, 2)  # Yellow border
-            
-            # Agent info line (grayed out if dead, brighter if selected)
-            agent_text = f"{agent_id}: {name} ({status})"
-            if status == "dead":
-                text_color = (150, 150, 150)
-            elif is_selected:
-                text_color = (255, 255, 200)  # Bright yellow-white for selected
+
+        # Background
+        sidebar_rect = pygame.Rect(sidebar_x, 0, self.sidebar_width, self.window_height)
+        pygame.draw.rect(self.screen, COLOR_SIDEBAR_BG, sidebar_rect)
+
+        # Tab bar
+        tab_bar_rect = pygame.Rect(sidebar_x, 0, self.sidebar_width, SIDEBAR_TAB_BAR_HEIGHT)
+        pygame.draw.rect(self.screen, (50, 50, 65), tab_bar_rect)
+        pygame.draw.line(self.screen, (80, 80, 90), (sidebar_x, SIDEBAR_TAB_BAR_HEIGHT), (sidebar_x + self.sidebar_width, SIDEBAR_TAB_BAR_HEIGHT), 2)
+
+        tab_labels = ["Colony", "Agents", "Tasks"]
+        tab_keys = ["colony", "agents", "tasks"]
+        self.sidebar_tab_rects = []
+        tw = self.sidebar_width // 3
+        for i, label in enumerate(tab_labels):
+            tab_rect = pygame.Rect(sidebar_x + i * tw, 0, tw, SIDEBAR_TAB_BAR_HEIGHT)
+            self.sidebar_tab_rects.append(tab_rect)
+            is_active = self.sidebar_tab == tab_keys[i]
+            color = COLOR_BUTTON_SELECTED if is_active else COLOR_BUTTON
+            pygame.draw.rect(self.screen, color, tab_rect)
+            if i > 0:
+                pygame.draw.line(self.screen, (60, 60, 70), (tab_rect.left, 4), (tab_rect.left, SIDEBAR_TAB_BAR_HEIGHT - 4), 1)
+            text_surf = self.font_small.render(label, True, COLOR_TEXT)
+            text_rect = text_surf.get_rect(center=tab_rect.center)
+            self.screen.blit(text_surf, text_rect)
+
+        content_top = SIDEBAR_TAB_BAR_HEIGHT + 10
+        y_offset = content_top
+
+        # Content area depends on active tab
+        if self.sidebar_tab == "colony":
+            # Colony: resources, turn, recruit
+            title = self.font.render("Colony Status", True, COLOR_TEXT)
+            self.screen.blit(title, (sidebar_x + 10, y_offset))
+            y_offset += 32
+            y_offset = self._draw_resource_bar(sidebar_x + 10, y_offset, "Oxygen", avg_oxygen, COLOR_RESOURCE_OXYGEN)
+            y_offset = self._draw_resource_bar(sidebar_x + 10, y_offset, "Calories", avg_calories, COLOR_RESOURCE_CALORIES)
+            y_offset = self._draw_resource_bar(sidebar_x + 10, y_offset, "Integrity", avg_integrity, COLOR_RESOURCE_INTEGRITY)
+            y_offset += 16
+            turn_text = self.font.render(f"Turn: {state.turn_number}", True, COLOR_TEXT)
+            self.screen.blit(turn_text, (sidebar_x + 10, y_offset))
+            y_offset += 40
+            RECRUIT_COST = (30, 30, 30)
+            can_recruit = (
+                agents and avg_oxygen >= RECRUIT_COST[0]
+                and avg_calories >= RECRUIT_COST[1]
+                and avg_integrity >= RECRUIT_COST[2]
+            )
+            recruit_rect = pygame.Rect(sidebar_x + 10, y_offset, self.sidebar_width - 20, 36)
+            self.recruit_button_rect = recruit_rect
+            recruit_color = COLOR_BUTTON_SELECTED if can_recruit else (80, 60, 60)
+            pygame.draw.rect(self.screen, recruit_color, recruit_rect)
+            pygame.draw.rect(self.screen, COLOR_TEXT, recruit_rect, 2)
+            recruit_text = self.font_small.render("Recruit Agent (30 each)", True, COLOR_TEXT)
+            self.screen.blit(recruit_text, recruit_text.get_rect(center=recruit_rect.center))
+            self.agent_scroll_up_rect = None
+            self.agent_scroll_down_rect = None
+
+        elif self.sidebar_tab == "agents":
+            self.recruit_button_rect = None
+            # Reserve a gutter on the right for scrollbar so content never overlaps
+            agents_gutter = 44
+            agents_content_right = sidebar_x + self.sidebar_width - agents_gutter
+            agents_content_width = self.sidebar_width - agents_gutter
+            agents_bar_max_width = agents_content_width - 50  # bars start at sidebar_x + 50
+
+            agents_title = self.font.render(f"Agents ({len(state.agents)}):", True, COLOR_TEXT)
+            self.screen.blit(agents_title, (sidebar_x + 10, y_offset))
+            y_offset += 28
+            agents_per_page = 5
+            agent_entry_height = 96  # height per agent block (content ~88 + separator gap 8)
+            total_agents = len(state.agents)
+            max_scroll = max(0, total_agents - agents_per_page)
+            self.agent_list_scroll = max(0, min(self.agent_list_scroll, max_scroll))
+            agents_list_top = y_offset
+            agents_list_height = agents_per_page * agent_entry_height
+
+            # Scroll column: track and buttons sit entirely in the gutter (no overlap with content)
+            scroll_btn_size = 22
+            scroll_track_x = sidebar_x + self.sidebar_width - agents_gutter
+            scroll_track_width = 18
+            scroll_track_inner_width = 10
+            scroll_track_inner_x = scroll_track_x + (scroll_track_width - scroll_track_inner_width) // 2
+
+            if total_agents > agents_per_page:
+                scroll_up_rect = pygame.Rect(scroll_track_x, agents_list_top, scroll_btn_size, scroll_btn_size)
+                scroll_down_rect = pygame.Rect(scroll_track_x, agents_list_top + agents_list_height - scroll_btn_size, scroll_btn_size, scroll_btn_size)
+                self.agent_scroll_up_rect = scroll_up_rect
+                self.agent_scroll_down_rect = scroll_down_rect
+                up_color = COLOR_BUTTON if self.agent_list_scroll > 0 else (50, 50, 50)
+                down_color = COLOR_BUTTON if self.agent_list_scroll < max_scroll else (50, 50, 50)
+                pygame.draw.rect(self.screen, up_color, scroll_up_rect)
+                pygame.draw.rect(self.screen, (60, 60, 70), scroll_up_rect, 1)
+                pygame.draw.rect(self.screen, down_color, scroll_down_rect)
+                pygame.draw.rect(self.screen, (60, 60, 70), scroll_down_rect, 1)
+                pygame.draw.polygon(self.screen, COLOR_TEXT, [
+                    (scroll_up_rect.centerx, scroll_up_rect.top + 6),
+                    (scroll_up_rect.left + 6, scroll_up_rect.bottom - 6),
+                    (scroll_up_rect.right - 6, scroll_up_rect.bottom - 6)
+                ])
+                pygame.draw.polygon(self.screen, COLOR_TEXT, [
+                    (scroll_down_rect.centerx, scroll_down_rect.bottom - 6),
+                    (scroll_down_rect.left + 6, scroll_down_rect.top + 6),
+                    (scroll_down_rect.right - 6, scroll_down_rect.top + 6)
+                ])
+                # Track between the two buttons
+                scroll_track_rect = pygame.Rect(scroll_track_inner_x, agents_list_top + scroll_btn_size, scroll_track_inner_width, agents_list_height - 2 * scroll_btn_size)
+                pygame.draw.rect(self.screen, (45, 45, 52), scroll_track_rect)
+                pygame.draw.rect(self.screen, (65, 65, 75), scroll_track_rect, 1)
+                thumb_height = max(28, int((agents_list_height - 2 * scroll_btn_size) * agents_per_page / total_agents))
+                thumb_y = agents_list_top + scroll_btn_size + int((agents_list_height - 2 * scroll_btn_size - thumb_height) * self.agent_list_scroll / max_scroll) if max_scroll > 0 else agents_list_top + scroll_btn_size
+                thumb_rect = pygame.Rect(scroll_track_inner_x + 1, thumb_y, scroll_track_inner_width - 2, thumb_height)
+                pygame.draw.rect(self.screen, (85, 88, 105), thumb_rect)
+                pygame.draw.rect(self.screen, (110, 115, 135), thumb_rect, 1)
             else:
-                text_color = COLOR_TEXT
-            text_surface = self.font_small.render(agent_text, True, text_color)
-            self.screen.blit(text_surface, (sidebar_x + 10, y_offset))
-            y_offset += 20
-            
-            # Health bars (grayed out if dead)
-            if status == "dead":
-                # Draw grayed out bars for dead agents
-                y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "O2", 0, (80, 80, 80))
-                y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "Cal", 0, (80, 80, 80))
-                y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "Int", 0, (80, 80, 80))
-            else:
-                y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "O2", oxygen, COLOR_RESOURCE_OXYGEN)
-                y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "Cal", calories, COLOR_RESOURCE_CALORIES)
-                y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "Int", integrity, COLOR_RESOURCE_INTEGRITY)
-            
-            # Location
-            loc_text = f"  Loc: {loc[0]}, {loc[1]}"
-            loc_color = (255, 255, 200) if is_selected else COLOR_TEXT
-            text_surface = self.font_small.render(loc_text, True, loc_color)
-            self.screen.blit(text_surface, (sidebar_x + 10, y_offset))
-            y_offset += 18
-            # Powerup badges (auto-walk to station when resource low)
-            powers = self.agent_powerups.get(agent_id, set())
-            if powers and status != "dead":
-                badges = []
-                if POWERUP_AUTO_OXYGEN in powers:
-                    badges.append("O2")
-                if POWERUP_AUTO_CALORIES in powers:
-                    badges.append("Cal")
-                if POWERUP_AUTO_INTEGRITY in powers:
-                    badges.append("Int")
-                if badges:
-                    auto_text = "Auto: " + " ".join(badges)
-                    badge_surface = self.font_small.render(auto_text, True, (150, 220, 150))
-                    self.screen.blit(badge_surface, (sidebar_x + 10, y_offset))
-            y_offset += 20
-        
-        y_offset += 10
-        
-        # Recruit Agent button (check average resources)
-        RECRUIT_COST = (30, 30, 30)  # O2, Cal, Int
-        can_recruit = (
-            agents and avg_oxygen >= RECRUIT_COST[0]
-            and avg_calories >= RECRUIT_COST[1]
-            and avg_integrity >= RECRUIT_COST[2]
-        )
-        recruit_rect = pygame.Rect(sidebar_x + 10, y_offset, self.sidebar_width - 20, 36)
-        self.recruit_button_rect = recruit_rect
-        recruit_color = COLOR_BUTTON_SELECTED if can_recruit else (80, 60, 60)
-        pygame.draw.rect(self.screen, recruit_color, recruit_rect)
-        pygame.draw.rect(self.screen, COLOR_TEXT, recruit_rect, 2)
-        recruit_text = self.font_small.render("Recruit Agent (30 each)", True, COLOR_TEXT)
-        self.screen.blit(recruit_text, recruit_text.get_rect(center=recruit_rect.center))
-        y_offset += 50
-        
-        # Active tasks
-        tasks_title = self.font.render("Active Tasks:", True, COLOR_TEXT)
-        self.screen.blit(tasks_title, (sidebar_x + 10, y_offset))
-        y_offset += 30
-        
-        for task in state.active_tasks:
-            task_id = task.get("task_id", "?")
-            agent_id = task.get("agent_id", None)
-            progress = task.get("progress", 0.0)
-            task_text = f"{task_id} (Agent {agent_id}, {progress*100:.0f}%)"
-            text_surface = self.font_small.render(task_text, True, COLOR_TEXT)
-            self.screen.blit(text_surface, (sidebar_x + 10, y_offset))
-            y_offset += 20
+                self.agent_scroll_up_rect = None
+                self.agent_scroll_down_rect = None
+
+            # Vertical divider between content and scroll gutter
+            div_x = agents_content_right
+            pygame.draw.line(self.screen, (55, 55, 65), (div_x, agents_list_top), (div_x, agents_list_top + agents_list_height), 1)
+
+            visible_agents = state.agents[self.agent_list_scroll:self.agent_list_scroll + agents_per_page]
+            for idx, agent in enumerate(visible_agents):
+                agent_entry_start_y = y_offset
+                agent_id = agent.get("id", "?")
+                name = agent.get("name", "Unknown")
+                oxygen = agent.get("oxygen", 0)
+                calories = agent.get("calories", 0)
+                integrity = agent.get("integrity", 0)
+                status = agent.get("status", "active")
+                loc = agent.get("location", (0, 0))
+                is_selected = (self.selected_agent_id == agent_id and status != "dead")
+                is_hovered = (self.hovered_agent_id == agent_id and status != "dead")
+                if is_hovered and not is_selected:
+                    hover_rect = pygame.Rect(sidebar_x + 5, agent_entry_start_y - 5, agents_content_width - 10, 88)
+                    pygame.draw.rect(self.screen, (70, 70, 30), hover_rect)
+                    pygame.draw.rect(self.screen, (255, 255, 0), hover_rect, 1)
+                if is_selected:
+                    highlight_rect = pygame.Rect(sidebar_x + 5, agent_entry_start_y - 5, agents_content_width - 10, 88)
+                    pygame.draw.rect(self.screen, (60, 80, 100), highlight_rect)
+                    pygame.draw.rect(self.screen, (255, 255, 0), highlight_rect, 2)
+                agent_text = f"{agent_id}: {name} ({status})"
+                text_color = (150, 150, 150) if status == "dead" else (COLOR_TEXT if not is_selected else (255, 255, 200))
+                text_surface = self.font_small.render(agent_text, True, text_color)
+                self.screen.blit(text_surface, (sidebar_x + 10, y_offset))
+                y_offset += 20
+                if status == "dead":
+                    y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "O2", 0, (80, 80, 80), max_bar_width=agents_bar_max_width)
+                    y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "Cal", 0, (80, 80, 80), max_bar_width=agents_bar_max_width)
+                    y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "Int", 0, (80, 80, 80), max_bar_width=agents_bar_max_width)
+                else:
+                    y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "O2", oxygen, COLOR_RESOURCE_OXYGEN, max_bar_width=agents_bar_max_width)
+                    y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "Cal", calories, COLOR_RESOURCE_CALORIES, max_bar_width=agents_bar_max_width)
+                    y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "Int", integrity, COLOR_RESOURCE_INTEGRITY, max_bar_width=agents_bar_max_width)
+                loc_text = f"  Loc: {loc[0]}, {loc[1]}"
+                text_surface = self.font_small.render(loc_text, True, (255, 255, 200) if is_selected else COLOR_TEXT)
+                self.screen.blit(text_surface, (sidebar_x + 10, y_offset))
+                y_offset += 18
+                powers = self.agent_powerups.get(agent_id, set())
+                if powers and status != "dead":
+                    badges = []
+                    if POWERUP_AUTO_OXYGEN in powers:
+                        badges.append("O2")
+                    if POWERUP_AUTO_CALORIES in powers:
+                        badges.append("Cal")
+                    if POWERUP_AUTO_INTEGRITY in powers:
+                        badges.append("Int")
+                    if badges:
+                        auto_text = "Auto: " + " ".join(badges)
+                        badge_surface = self.font_small.render(auto_text, True, (150, 220, 150))
+                        self.screen.blit(badge_surface, (sidebar_x + 10, y_offset))
+                y_offset += 20
+                # Separator line between agents (stops at content edge, not under scrollbar)
+                if idx < len(visible_agents) - 1:
+                    line_y = y_offset
+                    pygame.draw.line(self.screen, (70, 70, 80), (sidebar_x + 10, line_y), (agents_content_right - 6, line_y), 1)
+                    y_offset += 8
+
+        else:
+            # Tasks tab
+            self.recruit_button_rect = None
+            self.agent_scroll_up_rect = None
+            self.agent_scroll_down_rect = None
+            tasks_title = self.font.render("Active Tasks", True, COLOR_TEXT)
+            self.screen.blit(tasks_title, (sidebar_x + 10, y_offset))
+            y_offset += 30
+            for task in state.active_tasks:
+                task_id = task.get("task_id", "?")
+                agent_id = task.get("agent_id", None)
+                progress = task.get("progress", 0.0)
+                task_text = f"{task_id} (Agent {agent_id}, {progress*100:.0f}%)"
+                text_surface = self.font_small.render(task_text, True, COLOR_TEXT)
+                self.screen.blit(text_surface, (sidebar_x + 10, y_offset))
+                y_offset += 22
+            if not state.active_tasks:
+                no_tasks = self.font_small.render("No active tasks.", True, (140, 140, 140))
+                self.screen.blit(no_tasks, (sidebar_x + 10, y_offset))
         
     
     def _draw_resource_bar(self, x: int, y: int, label: str, value: float, color: Tuple[int, int, int]) -> int:
@@ -954,19 +1011,21 @@ class VisualGame:
         
         return bar_y + bar_height + 10
     
-    def _draw_small_bar(self, x: int, y: int, label: str, value: float, color: Tuple[int, int, int]) -> int:
-        """Draw a small resource bar and return next y position."""
+    def _draw_small_bar(self, x: int, y: int, label: str, value: float, color: Tuple[int, int, int], max_bar_width: Optional[int] = None) -> int:
+        """Draw a small resource bar and return next y position. max_bar_width limits bar width (e.g. when scrollbar is present)."""
         bar_width = SIDEBAR_WIDTH - 50
+        if max_bar_width is not None:
+            bar_width = min(bar_width, max_bar_width)
         bar_height = 12
-        
+
         # Label
         label_text = self.font_small.render(f"{label}:", True, COLOR_TEXT)
         self.screen.blit(label_text, (x, y))
-        
+
         # Bar
         bar_x = x + 30
         bar_y = y
-        
+
         bg_rect = pygame.Rect(bar_x, bar_y, bar_width, bar_height)
         pygame.draw.rect(self.screen, COLOR_RESOURCE_BAR_BG, bg_rect)
         
@@ -1106,16 +1165,17 @@ class VisualGame:
             
             if event.type == pygame.MOUSEWHEEL:
                 mouse_x, mouse_y = pygame.mouse.get_pos()
-                # Agent list scrolling (when mouse is over sidebar)
-                if mouse_x >= self.camera_width and self.game:
+                # Agent list scrolling only when Agents tab is active and mouse over sidebar
+                if mouse_x >= self.camera_width and self.game and self.sidebar_tab == "agents":
                     state = self.game.get_state()
                     total_agents = len(state.agents)
-                    if total_agents > 4:
+                    agents_per_page = 5
+                    if total_agents > agents_per_page:
                         if event.y > 0:
                             self.agent_list_scroll = max(0, self.agent_list_scroll - 1)
                         elif event.y < 0:
-                            self.agent_list_scroll = min(max(0, total_agents - 4), self.agent_list_scroll + 1)
-                else:
+                            self.agent_list_scroll = min(max(0, total_agents - agents_per_page), self.agent_list_scroll + 1)
+                elif mouse_x < self.camera_width:
                     # Zoom controls (when mouse is over game area)
                     if event.y > 0:
                         self.zoom_level = min(self.zoom_max, self.zoom_level + 0.1)
@@ -1151,14 +1211,23 @@ class VisualGame:
                 
                 # Sidebar interactions
                 if mouse_x >= self.camera_width:
-                    # Agent list scroll buttons
-                    if hasattr(self, 'agent_scroll_up_rect') and self.agent_scroll_up_rect.collidepoint(mouse_pos):
-                        self.agent_list_scroll = max(0, self.agent_list_scroll - 1)
-                    elif hasattr(self, 'agent_scroll_down_rect') and self.agent_scroll_down_rect.collidepoint(mouse_pos):
-                        self.agent_list_scroll = min(max(0, len(self.game.get_state().agents) - 4), self.agent_list_scroll + 1)
-                    # Recruit Agent button
-                    elif hasattr(self, 'recruit_button_rect') and self.recruit_button_rect.collidepoint(mouse_pos):
-                        self._recruit_agent()
+                    tab_clicked = False
+                    if hasattr(self, 'sidebar_tab_rects') and self.sidebar_tab_rects:
+                        for i, tr in enumerate(self.sidebar_tab_rects):
+                            if tr.collidepoint(mouse_pos):
+                                tabs = ["colony", "agents", "tasks"]
+                                if i < len(tabs):
+                                    self.sidebar_tab = tabs[i]
+                                tab_clicked = True
+                                break
+                    if not tab_clicked:
+                        if self.sidebar_tab == "agents":
+                            if hasattr(self, 'agent_scroll_up_rect') and self.agent_scroll_up_rect and self.agent_scroll_up_rect.collidepoint(mouse_pos):
+                                self.agent_list_scroll = max(0, self.agent_list_scroll - 1)
+                            elif hasattr(self, 'agent_scroll_down_rect') and self.agent_scroll_down_rect and self.agent_scroll_down_rect.collidepoint(mouse_pos):
+                                self.agent_list_scroll = min(max(0, len(self.game.get_state().agents) - 5), self.agent_list_scroll + 1)
+                        if self.sidebar_tab == "colony" and hasattr(self, 'recruit_button_rect') and self.recruit_button_rect and self.recruit_button_rect.collidepoint(mouse_pos):
+                            self._recruit_agent()
                 
                 # Check if click is in game area
                 if mouse_x < self.camera_width:
@@ -1563,6 +1632,11 @@ class VisualGame:
         
         for aid in to_remove:
             self.agent_paths.pop(aid, None)
+            # When agent stops moving, clear selection and hover so highlight goes away
+            if self.selected_agent_id == aid:
+                self.selected_agent_id = None
+            if self.hovered_agent_id == aid:
+                self.hovered_agent_id = None
     
     def _store_paths_from_assignments(self, assignments: List[Dict[str, Any]]):
         """Store path_coords from turn report assignments into agent_paths."""
@@ -1876,7 +1950,8 @@ class VisualGame:
             "  Powerups (O/Cal/Int circles): collect to grant",
             "  auto-walk (agent goes to station if that resource < 20%)",
             "  Agents die if any resource reaches 0",
-            "  Mouse wheel on sidebar - Scroll agents",
+            "  Sidebar: Colony | Agents | Tasks tabs",
+            "  Mouse wheel in Agents tab - Scroll agent list",
             "",
             "Menu:",
             "  ESC - Return to menu",
@@ -2445,6 +2520,26 @@ class VisualGame:
                 self._draw_game_over_screen()
             else:  # STATE_PLAYING
                 if self.game:
+                    # Update which agent is under the mouse (for hover highlight)
+                    mouse_x, mouse_y = pygame.mouse.get_pos()
+                    if mouse_x < self.camera_width:
+                        self.hovered_agent_id = self._get_agent_id_at_screen(mouse_x, mouse_y)
+                    elif mouse_x >= self.camera_width and self.sidebar_tab == "agents":
+                        agents_list_top = SIDEBAR_TAB_BAR_HEIGHT + 10 + 28
+                        agent_entry_height = 96
+                        agents_per_page = 5
+                        state = self.game.get_state()
+                        if agents_list_top <= mouse_y < agents_list_top + agents_per_page * agent_entry_height:
+                            row = (mouse_y - agents_list_top) // agent_entry_height
+                            visible = state.agents[self.agent_list_scroll:self.agent_list_scroll + agents_per_page]
+                            if 0 <= row < len(visible):
+                                self.hovered_agent_id = visible[row].get("id")
+                            else:
+                                self.hovered_agent_id = None
+                        else:
+                            self.hovered_agent_id = None
+                    else:
+                        self.hovered_agent_id = None
                     # Draw everything
                     self._draw_map()
                     self._draw_resource_stations()

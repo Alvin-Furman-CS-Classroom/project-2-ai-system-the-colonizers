@@ -16,6 +16,8 @@ Output: Selected disaster/event specification
 
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
+import math
+import random
 from src.module1_state.colony_state import ColonyState
 
 
@@ -31,6 +33,7 @@ class Event:
     severity: float  # 0.0 to 1.0
     resource_impact: Dict[str, float]  # Changes to resources
     description: str
+    target_station_id: Optional[str] = None
 
 
 class AIDirector:
@@ -49,6 +52,221 @@ class AIDirector:
             available_events: List of possible events the Director can choose
         """
         self.available_events = available_events
+        # Tunable behavior knobs (can be set from game settings)
+        self.aggression = 1.0
+        self.randomness = 0.4
+        self.repetition_window = 3
+        self.selection_top_k = 4
+
+    def configure(
+        self,
+        aggression: Optional[float] = None,
+        randomness: Optional[float] = None,
+        repetition_window: Optional[int] = None,
+        selection_top_k: Optional[int] = None,
+    ) -> None:
+        """Update director behavior settings at runtime."""
+        if aggression is not None:
+            self.aggression = max(0.1, float(aggression))
+        if randomness is not None:
+            self.randomness = max(0.0, min(1.0, float(randomness)))
+        if repetition_window is not None:
+            self.repetition_window = max(1, int(repetition_window))
+        if selection_top_k is not None:
+            self.selection_top_k = max(1, int(selection_top_k))
+
+    def _resource_stations(self, state: ColonyState) -> List[Dict[str, Any]]:
+        """Return normalized station records from infrastructure."""
+        stations: List[Dict[str, Any]] = []
+        for station_id, info in (state.infrastructure or {}).items():
+            if not isinstance(info, dict):
+                continue
+            if info.get("kind") != "resource_station":
+                continue
+            center = info.get("center")
+            if not isinstance(center, (tuple, list)) or len(center) != 2:
+                continue
+            stations.append({
+                "station_id": station_id,
+                "resource_type": info.get("resource_type", ""),
+                "center": (int(center[0]), int(center[1])),
+                "status": info.get("status", "operational"),
+            })
+        return stations
+
+    def _get_director_memory(self, state: ColonyState) -> Dict[str, Any]:
+        """Get or initialize director memory from infrastructure."""
+        infra = state.infrastructure if isinstance(state.infrastructure, dict) else {}
+        memory = infra.get("__director_memory__")
+        if not isinstance(memory, dict):
+            memory = {"recent_events": []}
+            infra["__director_memory__"] = memory
+            state.infrastructure = infra
+        if "recent_events" not in memory or not isinstance(memory["recent_events"], list):
+            memory["recent_events"] = []
+        return memory
+
+    def _remember_event(self, state: ColonyState, event: Event) -> None:
+        """Persist event choice to short-term memory for repetition penalties."""
+        memory = self._get_director_memory(state)
+        recent = memory.get("recent_events", [])
+        target_resource = ""
+        if event.resource_impact:
+            target_resource = max(event.resource_impact, key=lambda k: abs(event.resource_impact.get(k, 0.0)))
+        recent.append({
+            "turn": int(getattr(state, "turn_number", 0)),
+            "event_type": event.event_type,
+            "target_station_id": event.target_station_id or event.location,
+            "target_resource": target_resource,
+        })
+        # Keep a short horizon
+        if len(recent) > 8:
+            recent = recent[-8:]
+        memory["recent_events"] = recent
+
+    def _isolation_scores(self, state: ColonyState) -> Dict[str, float]:
+        """
+        Compute per-resource isolation score from station distances.
+        Higher means farther from the other station types.
+        """
+        stations = self._resource_stations(state)
+        by_type: Dict[str, Dict[str, Any]] = {}
+        for s in stations:
+            r = s.get("resource_type")
+            if r in ("oxygen", "calories", "integrity"):
+                by_type[r] = s
+        scores = {"oxygen": 0.0, "calories": 0.0, "integrity": 0.0}
+        if len(by_type) < 3:
+            return scores
+        for r, s in by_type.items():
+            sx, sy = s["center"]
+            dists: List[float] = []
+            for other_r, other in by_type.items():
+                if other_r == r:
+                    continue
+                ox, oy = other["center"]
+                dists.append(math.hypot(ox - sx, oy - sy))
+            avg = sum(dists) / len(dists) if dists else 0.0
+            # Normalize to typical world scale; clamp [0,1]
+            scores[r] = max(0.0, min(1.0, avg / 30.0))
+        return scores
+
+    def _targeted_event_candidates(self, state: ColonyState) -> List[Tuple[Event, float]]:
+        """Build weakness-aware candidate events with base scores."""
+        candidates: List[Tuple[Event, float]] = []
+        resources = state.resources or {}
+        iso = self._isolation_scores(state)
+        stations = self._resource_stations(state)
+        operational_stations = [s for s in stations if s.get("status") != "failed"]
+
+        # Resource pressure + map isolation
+        weakness_by_resource: Dict[str, float] = {}
+        for r in ("oxygen", "calories", "integrity"):
+            level = float(resources.get(r, 100.0))
+            resource_pressure = max(0.0, min(1.0, (100.0 - level) / 100.0))
+            weakness_by_resource[r] = 0.65 * resource_pressure + 0.35 * iso.get(r, 0.0)
+
+        # Resource-targeting candidates from catalog
+        for event in self.available_events:
+            base = 0.1
+            for r, impact in (event.resource_impact or {}).items():
+                if impact < 0:
+                    base += abs(impact) * weakness_by_resource.get(r, 0.0) / 40.0
+            # Favor stronger events slightly, but keep bounded
+            base *= 1.0 + (event.severity * 0.5)
+            candidates.append((event, base * self.aggression))
+
+        # Add station_breakdown candidates dynamically for operational stations
+        for s in operational_stations:
+            r = s.get("resource_type", "")
+            score = (0.25 + weakness_by_resource.get(r, 0.0)) * self.aggression
+            candidates.append((
+                Event(
+                    event_type="station_breakdown",
+                    location=s.get("station_id", ""),
+                    severity=min(1.0, 0.45 + weakness_by_resource.get(r, 0.0) * 0.4),
+                    resource_impact={},
+                    description=f"{r.capitalize()} station breakdown",
+                    target_station_id=s.get("station_id", ""),
+                ),
+                score,
+            ))
+
+        return candidates
+
+    def _apply_repetition_penalty(self, state: ColonyState, event: Event, score: float) -> float:
+        """Penalize recently repeated event types/targets/resources."""
+        memory = self._get_director_memory(state)
+        recent = list(memory.get("recent_events", []))
+        if not recent:
+            return score
+
+        turn = int(getattr(state, "turn_number", 0))
+        target_station = event.target_station_id or event.location
+        target_resource = ""
+        if event.resource_impact:
+            target_resource = max(event.resource_impact, key=lambda k: abs(event.resource_impact.get(k, 0.0)))
+
+        penalty = 0.0
+        for entry in recent[-self.repetition_window:]:
+            age = max(1, turn - int(entry.get("turn", turn)))
+            decay = 1.0 / age
+            if entry.get("event_type") == event.event_type:
+                penalty += 0.35 * decay
+            if target_station and entry.get("target_station_id") == target_station:
+                penalty += 0.45 * decay
+            if target_resource and entry.get("target_resource") == target_resource:
+                penalty += 0.3 * decay
+        return max(0.01, score - penalty)
+
+    def _select_event_targeted(self, colony_state: ColonyState) -> Event:
+        """
+        Select event using weakness-aware scoring with anti-repetition memory
+        and weighted randomness for semi-random player-facing behavior.
+        """
+        candidates = self._targeted_event_candidates(colony_state)
+        if not candidates:
+            # Fallback to catalog if something went wrong
+            if not self.available_events:
+                raise ValueError("No events available")
+            event = self.available_events[0]
+            self._remember_event(colony_state, event)
+            return event
+
+        # Hard anti-repeat rule: if any of the previous 5 events was station_breakdown,
+        # block station_breakdown from this selection.
+        memory = self._get_director_memory(colony_state)
+        recent = list(memory.get("recent_events", []))
+        station_breakdown_recent = any(
+            entry.get("event_type") == "station_breakdown" for entry in recent[-5:]
+        )
+        filtered_candidates = [
+            (event, base_score)
+            for event, base_score in candidates
+            if not (station_breakdown_recent and event.event_type == "station_breakdown")
+        ]
+        if not filtered_candidates:
+            filtered_candidates = candidates
+
+        scored: List[Tuple[Event, float]] = []
+        for event, base_score in filtered_candidates:
+            final_score = self._apply_repetition_penalty(colony_state, event, base_score)
+            scored.append((event, final_score))
+
+        # Focus on top-k while preserving semi-random feel.
+        scored.sort(key=lambda t: t[1], reverse=True)
+        top_limit = max(2, min(self.selection_top_k, len(scored)))
+        top = scored[:top_limit]
+        weights = [max(0.001, s) for _, s in top]
+        seed = int(colony_state.world_seed) + int(colony_state.turn_number) * 9973
+        rng = random.Random(seed)
+        # Lower randomness favors best-scoring deterministic choice.
+        if rng.random() > self.randomness:
+            selected = top[0][0]
+        else:
+            selected = rng.choices([e for e, _ in top], weights=weights, k=1)[0]
+        self._remember_event(colony_state, selected)
+        return selected
     
     def select_event_minimax(self, colony_state: ColonyState, depth: int = 3) -> Event:
         """
@@ -66,21 +284,9 @@ class AIDirector:
         Returns:
             Selected event
         """
-        if not self.available_events:
-            raise ValueError("No events available")
-
-        best_value: float = float("-inf")
-        best_event: Event = self.available_events[0]
-
-        for event in self.available_events:
-            state_after_event = self._simulate_event(colony_state, event)
-            # Director just moved; now it's Player's turn (min)
-            value = self._minimax_min(state_after_event, depth - 1)
-            if value > best_value:
-                best_value = value
-                best_event = event
-
-        return best_event
+        # Keep API name for compatibility, but use the newer targeted selector
+        # that models map weaknesses and anti-repetition behavior.
+        return self._select_event_targeted(colony_state)
 
     def _get_state_challenge(self, state: ColonyState) -> float:
         """

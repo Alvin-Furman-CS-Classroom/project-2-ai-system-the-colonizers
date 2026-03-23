@@ -12,6 +12,11 @@ from typing import Dict, Any, List
 from src.module1_state.colony_state import ColonyState
 from src.module4_game_theory.ai_director import Event
 
+BASE_REPAIR_TURNS = 5
+PER_AGENT_DEPLETION_PERCENT_MULTIPLIER = 1.2
+PER_AGENT_DEPLETION_PERCENT_MIN = 0.10
+PER_AGENT_DEPLETION_PERCENT_MAX = 0.60
+
 
 class EventResolver:
     """
@@ -39,6 +44,7 @@ class EventResolver:
             "hull_breach": self._handle_hull_breach,
             "resource_shortage": self._handle_resource_shortage,
             "equipment_failure": self._handle_equipment_failure,
+            "station_breakdown": self._handle_station_breakdown,
             # Add more event handlers as needed
         }
     
@@ -58,6 +64,8 @@ class EventResolver:
         """
         # Apply direct resource impacts
         colony_state.consume_resources(event.resource_impact)
+        # Resource-depleting events should also hit each living agent's personal resources.
+        self._apply_agent_resource_depletion(colony_state, event)
         
         # Apply event-specific effects
         handler = self.event_handlers.get(event.event_type, self._handle_generic)
@@ -75,6 +83,36 @@ class EventResolver:
             "cascading_effects": cascading_effects,
             "state_after": colony_state.to_dict()
         }
+
+    def _apply_agent_resource_depletion(self, colony_state: ColonyState, event: Event) -> None:
+        """Apply percentage-based per-agent depletion for negative resource-impact events."""
+        if not event.resource_impact:
+            return
+        depletion_percent: Dict[str, float] = {}
+        for resource, impact in event.resource_impact.items():
+            if impact >= 0:
+                continue
+            percent = min(
+                PER_AGENT_DEPLETION_PERCENT_MAX,
+                max(
+                    PER_AGENT_DEPLETION_PERCENT_MIN,
+                    (abs(float(impact)) / 100.0) * PER_AGENT_DEPLETION_PERCENT_MULTIPLIER,
+                ),
+            )
+            depletion_percent[resource] = percent
+        if not depletion_percent:
+            return
+        for agent in colony_state.agents:
+            if agent.get("status") == "dead":
+                continue
+            agent_id = agent.get("id")
+            if agent_id is None:
+                continue
+            per_agent_depletion: Dict[str, float] = {}
+            for resource, percent in depletion_percent.items():
+                current_value = float(agent.get(resource, 0.0))
+                per_agent_depletion[resource] = -(current_value * percent)
+            colony_state.consume_agent_resources(int(agent_id), per_agent_depletion)
     
     def _handle_hull_breach(self, colony_state: ColonyState, event: Event) -> Dict[str, Any]:
         """
@@ -175,6 +213,35 @@ class EventResolver:
         return {
             "event_type": event.event_type,
             "note": "Generic handler applied"
+        }
+
+    def _handle_station_breakdown(self, colony_state: ColonyState, event: Event) -> Dict[str, Any]:
+        """
+        Handle resource station breakdown events.
+
+        Marks the targeted station as failed and initializes repair metadata.
+        """
+        station_id = event.target_station_id or event.location
+        if not station_id:
+            return {"error": "Missing target station id for station_breakdown"}
+
+        station = colony_state.infrastructure.get(station_id)
+        if not isinstance(station, dict) or station.get("kind") != "resource_station":
+            return {"error": f"Invalid station target: {station_id}"}
+
+        station["status"] = "failed"
+        if int(station.get("repair_remaining_turns", 0)) <= 0:
+            station["repair_remaining_turns"] = BASE_REPAIR_TURNS
+        station["repair_total_turns"] = max(
+            int(station.get("repair_total_turns", BASE_REPAIR_TURNS)),
+            int(station.get("repair_remaining_turns", BASE_REPAIR_TURNS)),
+        )
+        station["repair_agent_id"] = None
+
+        return {
+            "station_id": station_id,
+            "status": station["status"],
+            "repair_remaining_turns": station["repair_remaining_turns"],
         }
     
     def _check_cascading_effects(self, colony_state: ColonyState, event: Event) -> List[Dict[str, Any]]:

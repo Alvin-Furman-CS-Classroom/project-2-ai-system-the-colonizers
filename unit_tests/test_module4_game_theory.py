@@ -41,6 +41,54 @@ class TestAIDirector(unittest.TestCase):
         self.assertIsInstance(challenge, float)
         self.assertGreaterEqual(challenge, 0.0)
 
+    def test_isolation_scores_with_station_layout(self):
+        """Isolation scoring should return normalized values for each resource type."""
+        self.state.infrastructure.update({
+            "oxy_station_1": {
+                "kind": "resource_station",
+                "resource_type": "oxygen",
+                "center": (-20, 0),
+                "size": 2,
+                "status": "operational",
+            },
+            "cal_station_1": {
+                "kind": "resource_station",
+                "resource_type": "calories",
+                "center": (0, 0),
+                "size": 2,
+                "status": "operational",
+            },
+            "int_station_1": {
+                "kind": "resource_station",
+                "resource_type": "integrity",
+                "center": (20, 0),
+                "size": 3,
+                "status": "operational",
+            },
+        })
+        scores = self.director._isolation_scores(self.state)
+        self.assertIn("oxygen", scores)
+        self.assertIn("calories", scores)
+        self.assertIn("integrity", scores)
+        self.assertTrue(all(0.0 <= v <= 1.0 for v in scores.values()))
+
+    def test_repetition_penalty_reduces_score(self):
+        """Recent repeated targets/types should reduce candidate score."""
+        self.state.infrastructure["__director_memory__"] = {
+            "recent_events": [
+                {
+                    "turn": 3,
+                    "event_type": "resource_shortage",
+                    "target_station_id": "storage",
+                    "target_resource": "calories",
+                }
+            ]
+        }
+        self.state.turn_number = 4
+        event = Event("resource_shortage", "storage", 0.3, {"calories": -15.0}, "Test shortage")
+        penalized = self.director._apply_repetition_penalty(self.state, event, 1.0)
+        self.assertLess(penalized, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

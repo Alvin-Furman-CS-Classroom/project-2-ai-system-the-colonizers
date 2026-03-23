@@ -18,6 +18,9 @@ from src.module4_game_theory.ai_director import AIDirector, Event
 from src.module5_events.event_resolver import EventResolver
 from src.module6_rl.survival_assessor import SurvivalAssessor
 
+BASE_REPAIR_TURNS = 5
+MAX_EFFECTIVE_REPAIR_AGENTS = 3
+
 
 class GameEngine:
     """
@@ -72,6 +75,19 @@ class GameEngine:
                 description="Life support equipment failure"
             ),
         ]
+
+    def set_ai_director_settings(
+        self,
+        aggression: Optional[float] = None,
+        randomness: Optional[float] = None,
+        repetition_window: Optional[int] = None,
+    ) -> None:
+        """Update AI director behavior settings at runtime."""
+        self.ai_director.configure(
+            aggression=aggression,
+            randomness=randomness,
+            repetition_window=repetition_window,
+        )
     
     def run_logic_phase(self) -> Dict[str, Any]:
         """
@@ -209,6 +225,10 @@ class GameEngine:
         logic_result = self.run_logic_phase()
         turn_report["phases"]["logic"] = logic_result
 
+        # Station repair progression (player-driven, time-based; scales with agents present)
+        repair_result = self._advance_station_repairs()
+        turn_report["phases"]["repairs"] = repair_result
+
         # Phase 2: Planning - Task Optimization (Module 2)
         planning_result = self.run_planning_phase(player_tasks, algorithm=algorithm)
         turn_report["phases"]["planning"] = planning_result
@@ -229,6 +249,122 @@ class GameEngine:
         self.state.next_turn()
 
         return turn_report
+
+    def _resource_stations(self) -> List[Dict[str, Any]]:
+        """Return infrastructure entries that represent resource stations."""
+        stations: List[Dict[str, Any]] = []
+        infra = self.state.infrastructure or {}
+        for station_id, info in infra.items():
+            if not isinstance(info, dict):
+                continue
+            if info.get("kind") != "resource_station":
+                continue
+            center = info.get("center")
+            size = info.get("size")
+            if not isinstance(center, (tuple, list)) or len(center) != 2:
+                continue
+            if not isinstance(size, int):
+                continue
+            stations.append({
+                "station_id": station_id,
+                "center_x": int(center[0]),
+                "center_y": int(center[1]),
+                "size": int(size),
+                "status": info.get("status", "operational"),
+                "repair_remaining_turns": int(info.get("repair_remaining_turns", 0)),
+                "repair_agent_id": info.get("repair_agent_id"),
+            })
+        return stations
+
+    def _station_tiles(self, center_x: int, center_y: int, size: int) -> List[Tuple[int, int]]:
+        """Return all world tiles occupied by a station footprint."""
+        offset = size // 2
+        tiles: List[Tuple[int, int]] = []
+        for x in range(center_x - offset, center_x + offset + 1):
+            for y in range(center_y - offset, center_y + offset + 1):
+                tiles.append((x, y))
+        return tiles
+
+    def _is_failed_station_tile(self, x: int, y: int) -> bool:
+        """True if tile (x, y) belongs to a failed resource station footprint."""
+        for station in self._resource_stations():
+            if station["status"] != "failed":
+                continue
+            if (x, y) in self._station_tiles(station["center_x"], station["center_y"], station["size"]):
+                return True
+        return False
+
+    def _agents_on_station(self, center_x: int, center_y: int, size: int) -> List[Dict[str, Any]]:
+        """Return living agents currently standing on the given station footprint."""
+        tiles = set(self._station_tiles(center_x, center_y, size))
+        present: List[Dict[str, Any]] = []
+        for agent in self.state.agents:
+            if agent.get("status") == "dead":
+                continue
+            loc = agent.get("location")
+            if not isinstance(loc, (tuple, list)) or len(loc) != 2:
+                continue
+            if (int(loc[0]), int(loc[1])) in tiles:
+                present.append(agent)
+        return present
+
+    def _advance_station_repairs(self) -> Dict[str, Any]:
+        """
+        Advance time-based repair progress for failed resource stations.
+
+        Rules:
+        - Repair progresses only while one or more living agents are on-station.
+        - Progress per turn scales with number of agents present, capped.
+        - Repair can pause/resume and allows handoff between agents.
+        """
+        repaired: List[str] = []
+        progressed: List[Dict[str, Any]] = []
+        paused: List[str] = []
+
+        infra = self.state.infrastructure or {}
+        for station in self._resource_stations():
+            station_id = station["station_id"]
+            if station["status"] != "failed":
+                continue
+            info = infra.get(station_id)
+            if not isinstance(info, dict):
+                continue
+
+            remaining = int(info.get("repair_remaining_turns", 0))
+            if remaining <= 0:
+                remaining = BASE_REPAIR_TURNS
+                info["repair_remaining_turns"] = remaining
+            if int(info.get("repair_total_turns", 0)) <= 0:
+                info["repair_total_turns"] = max(remaining, BASE_REPAIR_TURNS)
+
+            on_station = self._agents_on_station(station["center_x"], station["center_y"], station["size"])
+            if not on_station:
+                info["repair_agent_id"] = None
+                paused.append(station_id)
+                continue
+
+            # Handoff allowed: choose deterministic owner among present agents.
+            sorted_present = sorted(on_station, key=lambda a: int(a.get("id", 10**9)))
+            repair_agent_id = sorted_present[0].get("id")
+            info["repair_agent_id"] = repair_agent_id
+
+            effective_agents = min(len(on_station), MAX_EFFECTIVE_REPAIR_AGENTS)
+            remaining = max(0, remaining - effective_agents)
+            info["repair_remaining_turns"] = remaining
+            progressed.append({
+                "station_id": station_id,
+                "repair_agent_id": repair_agent_id,
+                "agents_on_station": len(on_station),
+                "effective_agents": effective_agents,
+                "remaining_turns": remaining,
+            })
+
+            if remaining <= 0:
+                info["status"] = "operational"
+                info["repair_agent_id"] = None
+                repaired.append(station_id)
+
+        return {"repaired": repaired, "progressed": progressed, "paused": paused}
     
     def _is_tile_passable(self, x: int, y: int, exclude_agent_id: Optional[int] = None) -> bool:
         """
@@ -249,10 +385,16 @@ class GameEngine:
         tile = self.state.get_tile_at(x, y)
         if not tile.get("passable", True):
             return False
-        
+
         return True
     
-    def _grid_pathfind(self, start: Tuple[int, int], goal: Tuple[int, int], exclude_agent_id: Optional[int] = None) -> List[Tuple[int, int]]:
+    def _grid_pathfind(
+        self,
+        start: Tuple[int, int],
+        goal: Tuple[int, int],
+        exclude_agent_id: Optional[int] = None,
+        allow_blocked_goal: bool = True,
+    ) -> List[Tuple[int, int]]:
         """
         A* pathfinding directly on the tile grid.
         Finds optimal path from start to goal, avoiding obstacles and occupied tiles.
@@ -272,8 +414,11 @@ class GameEngine:
         if start == goal:
             return [start]
         
-        # Check if goal is passable
-        if not self._is_tile_passable(goal[0], goal[1], exclude_agent_id):
+        goal_blocked = not self._is_tile_passable(goal[0], goal[1], exclude_agent_id)
+
+        # Allow targeting a blocked goal tile (used for repairing failed stations),
+        # but still prevent passing through blocked tiles.
+        if goal_blocked and not allow_blocked_goal:
             # Goal is blocked - try to find nearest passable tile
             best_alt = None
             best_dist = float('inf')
@@ -344,7 +489,9 @@ class GameEngine:
                 
                 # Check if neighbor is passable
                 if not self._is_tile_passable(neighbor[0], neighbor[1], exclude_agent_id):
-                    continue
+                    # Blocked goal tile is allowed only as final destination.
+                    if not (allow_blocked_goal and neighbor == goal):
+                        continue
                 
                 # Get tile to check movement speed (water is slow)
                 tile = self.state.get_tile_at(neighbor[0], neighbor[1])
@@ -392,7 +539,12 @@ class GameEngine:
         
         # Use grid-based pathfinding (more reliable for arbitrary coordinates)
         # Exclude this agent from occupancy checks so it can pathfind through its own position
-        path_coords = self._grid_pathfind(start, goal, exclude_agent_id=agent_id)
+        path_coords = self._grid_pathfind(
+            start,
+            goal,
+            exclude_agent_id=agent_id,
+            allow_blocked_goal=True,
+        )
         
         # If pathfinding failed, return empty list
         if not path_coords:

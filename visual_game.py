@@ -80,6 +80,7 @@ POWERUP_AUTO_OXYGEN = "auto_oxygen"
 POWERUP_AUTO_CALORIES = "auto_calories"
 POWERUP_AUTO_INTEGRITY = "auto_integrity"
 AUTO_WALK_THRESHOLD = 20.0  # Percent below which agent auto-walks to station
+VISUAL_REPAIR_AGENT_CAP = 3
 
 # Game States
 STATE_MENU = "menu"
@@ -120,6 +121,22 @@ class ResourceStation:
         elif self.station_type == STATION_INTEGRITY:
             return "integrity"
         return "oxygen"
+
+    def to_infrastructure_dict(self) -> Dict[str, Any]:
+        """Convert station metadata to a serializable infrastructure record."""
+        return {
+            "kind": "resource_station",
+            "station_id": self.station_id,
+            "station_type": self.station_type,
+            "resource_type": self.get_resource_type(),
+            "center": (self.center_x, self.center_y),
+            "size": self.size,
+            "tiles": self.get_tiles(),
+            "status": "operational",
+            "repair_remaining_turns": 0,
+            "repair_total_turns": 0,
+            "repair_agent_id": None,
+        }
 
 
 def _station_tiles(center_x: int, center_y: int, size: int) -> List[Tuple[int, int]]:
@@ -220,13 +237,18 @@ class VisualGame:
         # Menu navigation
         self.menu_selection = 0  # 0 = New Game, 1 = Options, 2 = Quit
         self.options_selection = 0  # 0 = Difficulty, 1 = Advanced, 2 = Controls, 3 = Back
-        self.advanced_selection = 0  # 0 = Algorithm, 1 = Turn Speed, 2 = Decay Rate, 3 = Back
+        self.advanced_selection = 0  # 0=Algorithm, 1=Turn Speed, 2=Decay, 3=AI Aggro, 4=AI Random, 5=AI Cooldown, 6=Back
         self.difficulty_selection = 1  # 0 = Easy, 1 = Normal, 2 = Hard
         self.algorithm_selection = 0  # 0 = A*, 1 = IDA*, 2 = Beam Search
         self.starting_agents = 2  # 1-5, selected at new game setup
         
         # Decay rate multipliers (1.0 = default, higher = faster decay)
         self.decay_multiplier = 1.0  # Multiplier for decay rates
+        # AI Director tuning knobs (editable in Advanced settings)
+        self.ai_aggression = 1.0
+        self.ai_randomness = 0.4
+        self.ai_repeat_cooldown = 3
+        self._apply_difficulty_defaults()
         
         # Fullscreen mode
         self.fullscreen = False
@@ -502,6 +524,7 @@ class VisualGame:
         # Place resource stations (randomized per game and per stage; deterministic from seed + stage)
         self.current_stage = 0
         self.resource_stations = self._choose_station_placements(initial_state, self.current_stage)
+        self._sync_stations_to_state(initial_state)
         
         # Spawn one of each auto-walk powerup (deterministic from seed)
         self.powerups = []
@@ -509,20 +532,111 @@ class VisualGame:
         self.agent_auto_target = {}
         self._spawn_initial_powerups(initial_state)
         
-        # Adjust difficulty based on settings (slower game)
-        if self.difficulty == "easy":
-            self.turn_interval = 15.0  # Was 10.0
-        elif self.difficulty == "hard":
-            self.turn_interval = 8.0  # Was 5.0
-        else:
-            self.turn_interval = 12.0  # Was 8.0
+        # Apply difficulty defaults (turn pacing, decay, AI tuning)
+        self._apply_difficulty_defaults()
         
         self.turn_timer = self.turn_interval * 1000
         self.last_decay_time = pygame.time.get_ticks()  # Initialize decay timer
         
         self.agent_paths.clear()
         self.agent_visual_pos.clear()
-        return GameEngine(initial_state)
+        engine = GameEngine(initial_state)
+        self.game = engine
+        self._apply_ai_settings_to_engine()
+        return engine
+
+    def _difficulty_defaults(self, difficulty: str) -> Dict[str, float]:
+        """Return default gameplay + AI settings for a difficulty preset."""
+        presets = {
+            "easy": {
+                "turn_interval": 15.0,
+                "decay_multiplier": 0.8,
+                "ai_aggression": 0.75,
+                "ai_randomness": 0.65,
+                "ai_repeat_cooldown": 4,
+            },
+            "normal": {  # medium
+                "turn_interval": 12.0,
+                "decay_multiplier": 1.0,
+                "ai_aggression": 1.0,
+                "ai_randomness": 0.4,
+                "ai_repeat_cooldown": 3,
+            },
+            "hard": {
+                "turn_interval": 8.0,
+                "decay_multiplier": 1.25,
+                "ai_aggression": 1.3,
+                "ai_randomness": 0.2,
+                "ai_repeat_cooldown": 2,
+            },
+        }
+        return presets.get(difficulty, presets["normal"])
+
+    def _apply_ai_settings_to_engine(self) -> None:
+        """Push current AI tuning values into the running GameEngine (if any)."""
+        if not self.game:
+            return
+        self.game.set_ai_director_settings(
+            aggression=self.ai_aggression,
+            randomness=self.ai_randomness,
+            repetition_window=self.ai_repeat_cooldown,
+        )
+
+    def _apply_difficulty_defaults(self) -> None:
+        """Apply default settings bundle for the current difficulty."""
+        defaults = self._difficulty_defaults(self.difficulty)
+        self.turn_interval = float(defaults["turn_interval"])
+        self.turn_timer = self.turn_interval * 1000
+        self.decay_multiplier = float(defaults["decay_multiplier"])
+        self.ai_aggression = float(defaults["ai_aggression"])
+        self.ai_randomness = float(defaults["ai_randomness"])
+        self.ai_repeat_cooldown = int(defaults["ai_repeat_cooldown"])
+        self._apply_ai_settings_to_engine()
+
+    def _sync_stations_to_state(self, state: ColonyState) -> None:
+        """
+        Persist station layout/runtime metadata into ColonyState infrastructure.
+
+        This keeps station data in the authoritative game state so it can be
+        saved/loaded and used by the AI/event systems.
+        """
+        for station in self.resource_stations:
+            existing = state.infrastructure.get(station.station_id, {})
+            merged = station.to_infrastructure_dict()
+            # Preserve runtime fields when re-syncing (e.g., after load/stage updates)
+            merged["status"] = existing.get("status", merged["status"])
+            merged["repair_remaining_turns"] = existing.get(
+                "repair_remaining_turns", merged["repair_remaining_turns"]
+            )
+            merged["repair_total_turns"] = existing.get(
+                "repair_total_turns", merged["repair_total_turns"]
+            )
+            merged["repair_agent_id"] = existing.get("repair_agent_id", merged["repair_agent_id"])
+            state.infrastructure[station.station_id] = merged
+
+    def _get_station_state(self, station: ResourceStation) -> Dict[str, Any]:
+        """Get runtime station state from ColonyState infrastructure."""
+        if not self.game:
+            return station.to_infrastructure_dict()
+        state = self.game.get_state()
+        return state.infrastructure.get(station.station_id, station.to_infrastructure_dict())
+
+    def _count_living_agents_on_station(self, station: ResourceStation) -> int:
+        """Return number of living agents currently standing on a station footprint."""
+        if not self.game:
+            return 0
+        state = self.game.get_state()
+        station_tiles = set(station.get_tiles())
+        count = 0
+        for agent in state.agents:
+            if agent.get("status") == "dead":
+                continue
+            loc = agent.get("location")
+            if not isinstance(loc, (tuple, list)) or len(loc) != 2:
+                continue
+            if (int(loc[0]), int(loc[1])) in station_tiles:
+                count += 1
+        return count
     
     def _get_tile_color(self, terrain: str) -> Tuple[int, int, int]:
         """Get color for a terrain type."""
@@ -1867,15 +1981,21 @@ class VisualGame:
         
         # Decay rate
         decay_text = f"Decay Rate: {self.decay_multiplier:.2f}x"
+        ai_aggression_text = f"AI Aggression: {self.ai_aggression:.2f}x"
+        ai_randomness_text = f"AI Randomness: {self.ai_randomness:.2f}"
+        ai_cooldown_text = f"AI Repeat Cooldown: {self.ai_repeat_cooldown} turns"
         
         options_list = [
             algo_text,
             speed_text,
             decay_text,
+            ai_aggression_text,
+            ai_randomness_text,
+            ai_cooldown_text,
             "Back"
         ]
         # Rows that use left/right click to adjust (show split)
-        slider_rows = {1, 2}  # Turn Speed, Decay Rate
+        slider_rows = {1, 2, 3, 4, 5}
         
         y_start = 200
         self.advanced_button_rects = []
@@ -1934,6 +2054,21 @@ class VisualGame:
             decay_text = self.font_small.render("- = faster decay (harder)  + = slower decay (easier)  Range: 0.1x-3.0x", True, COLOR_TEXT)
             decay_text_rect = decay_text.get_rect(center=(WINDOW_WIDTH // 2, decay_y))
             self.screen.blit(decay_text, decay_text_rect)
+
+        if self.advanced_selection == 3:
+            y = y_start + len(options_list) * 56 + 20
+            txt = self.font_small.render("- = less punishing AI  + = more punishing AI  Range: 0.5x-2.0x", True, COLOR_TEXT)
+            self.screen.blit(txt, txt.get_rect(center=(WINDOW_WIDTH // 2, y)))
+
+        if self.advanced_selection == 4:
+            y = y_start + len(options_list) * 56 + 20
+            txt = self.font_small.render("- = more deterministic AI  + = more variety  Range: 0.0-1.0", True, COLOR_TEXT)
+            self.screen.blit(txt, txt.get_rect(center=(WINDOW_WIDTH // 2, y)))
+
+        if self.advanced_selection == 5:
+            y = y_start + len(options_list) * 56 + 20
+            txt = self.font_small.render("- = less cooldown  + = more cooldown  Range: 1-6 turns", True, COLOR_TEXT)
+            self.screen.blit(txt, txt.get_rect(center=(WINDOW_WIDTH // 2, y)))
     
     def _draw_controls(self):
         """Draw controls help screen."""
@@ -2002,6 +2137,9 @@ class VisualGame:
             tiles = station.get_tiles()
             if not tiles:
                 continue
+            station_state = self._get_station_state(station)
+            is_failed = station_state.get("status") == "failed"
+            center_screen_x, center_screen_y = self._world_to_screen(station.center_x, station.center_y)
 
             # Prefer textured buildings if available
             img = None
@@ -2013,7 +2151,6 @@ class VisualGame:
                 img = self.img_station_integrity
 
             if img is not None:
-                center_screen_x, center_screen_y = self._world_to_screen(station.center_x, station.center_y)
                 margin = ts * 2  # Ensure visible when near screen
                 if -margin <= center_screen_x <= self.camera_width + margin and -margin <= center_screen_y <= self.camera_height + margin:
                     # Scale building based on zoom (proportional to tile size)
@@ -2023,6 +2160,25 @@ class VisualGame:
                     scaled = pygame.transform.smoothscale(img, (new_w, new_h))
                     rect = scaled.get_rect(center=(center_screen_x, center_screen_y))
                     self.screen.blit(scaled, rect)
+                    if is_failed:
+                        # Failed stations are visibly darkened and marked.
+                        overlay = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+                        overlay.fill((0, 0, 0, 130))
+                        self.screen.blit(overlay, rect.topleft)
+                        pygame.draw.line(
+                            self.screen,
+                            (255, 80, 80),
+                            rect.topleft,
+                            rect.bottomright,
+                            max(2, ts // 10),
+                        )
+                        pygame.draw.line(
+                            self.screen,
+                            (255, 80, 80),
+                            rect.topright,
+                            rect.bottomleft,
+                            max(2, ts // 10),
+                        )
             else:
                 # Fallback: colored rectangles as before
                 if station.station_type == STATION_OXYGEN:
@@ -2038,6 +2194,47 @@ class VisualGame:
                             rect = pygame.Rect(screen_x - ts // 2, screen_y - ts // 2, ts, ts)
                             pygame.draw.rect(self.screen, color, rect)
                             pygame.draw.rect(self.screen, (0, 0, 0), rect, 2)
+                            if is_failed:
+                                pygame.draw.line(self.screen, (255, 80, 80), rect.topleft, rect.bottomright, 2)
+                                pygame.draw.line(self.screen, (255, 80, 80), rect.topright, rect.bottomleft, 2)
+
+            # Repair status indicator for failed stations (active vs paused + continuous progress)
+            if is_failed and -ts <= center_screen_x <= self.camera_width + ts and -ts <= center_screen_y <= self.camera_height + ts:
+                remaining = int(station_state.get("repair_remaining_turns", 0))
+                total = int(station_state.get("repair_total_turns", 5))
+                total = max(1, total)
+                agents_on_station = self._count_living_agents_on_station(station)
+                active = agents_on_station > 0
+                indicator = "REPAIRING" if active else "REPAIR PAUSED"
+                line1_color = (255, 220, 120) if active else (255, 120, 120)
+                line1 = self.font_small.render(indicator, True, line1_color)
+                line1_rect = line1.get_rect(center=(center_screen_x, center_screen_y - max(24, ts)))
+                bar_w = max(80, ts * 3)
+                bar_h = max(8, ts // 4)
+                bar_rect = pygame.Rect(center_screen_x - bar_w // 2, line1_rect.bottom + 2, bar_w, bar_h)
+
+                # Continuous progress preview between turns based on elapsed turn fraction.
+                progress_complete = total - max(0, remaining)
+                if active and self.turn_timer > 0:
+                    now = pygame.time.get_ticks()
+                    turn_frac = max(0.0, min(1.0, (now - self.last_turn_time) / float(self.turn_timer)))
+                    effective_agents = min(agents_on_station, VISUAL_REPAIR_AGENT_CAP)
+                    progress_complete += effective_agents * turn_frac
+                progress_ratio = max(0.0, min(1.0, progress_complete / float(total)))
+
+                bg_w = max(line1_rect.width, bar_w) + 10
+                bg_h = (bar_rect.bottom - line1_rect.top) + 6
+                bg_rect = pygame.Rect(center_screen_x - bg_w // 2, line1_rect.top - 2, bg_w, bg_h)
+                pygame.draw.rect(self.screen, (15, 15, 20), bg_rect)
+                pygame.draw.rect(self.screen, (80, 80, 90), bg_rect, 1)
+                self.screen.blit(line1, line1_rect)
+                pygame.draw.rect(self.screen, (45, 45, 55), bar_rect)
+                fill_w = int(bar_w * progress_ratio)
+                if fill_w > 0:
+                    fill_rect = pygame.Rect(bar_rect.left, bar_rect.top, fill_w, bar_h)
+                    fill_color = (255, 200, 80) if active else (170, 95, 95)
+                    pygame.draw.rect(self.screen, fill_color, fill_rect)
+                pygame.draw.rect(self.screen, (210, 210, 220), bar_rect, 1)
     
     def _get_station_at(self, world_x: int, world_y: int) -> Optional[ResourceStation]:
         """Get station at world coordinates."""
@@ -2220,6 +2417,7 @@ class VisualGame:
                                 difficulties = ["easy", "normal", "hard"]
                                 self.difficulty_selection = (self.difficulty_selection + 1) % 3
                                 self.difficulty = difficulties[self.difficulty_selection]
+                                self._apply_difficulty_defaults()
                             elif i == 1:  # Advanced
                                 self.game_state = STATE_ADVANCED
                             elif i == 2:  # Controls
@@ -2238,6 +2436,7 @@ class VisualGame:
                         difficulties = ["easy", "normal", "hard"]
                         self.difficulty_selection = (self.difficulty_selection + 1) % 3
                         self.difficulty = difficulties[self.difficulty_selection]
+                        self._apply_difficulty_defaults()
                     elif self.options_selection == 1:  # Advanced
                         self.game_state = STATE_ADVANCED
                     elif self.options_selection == 2:  # Controls
@@ -2281,15 +2480,36 @@ class VisualGame:
                                 else:
                                     # Right half: slower decay (easier)
                                     self.decay_multiplier = min(3.0, self.decay_multiplier + 0.2)
-                            elif i == 3:  # Back
+                            elif i == 3:  # AI Aggression
+                                mouse_x = mouse_pos[0]
+                                if mouse_x < WINDOW_WIDTH // 2:
+                                    self.ai_aggression = max(0.5, self.ai_aggression - 0.1)
+                                else:
+                                    self.ai_aggression = min(2.0, self.ai_aggression + 0.1)
+                                self._apply_ai_settings_to_engine()
+                            elif i == 4:  # AI Randomness
+                                mouse_x = mouse_pos[0]
+                                if mouse_x < WINDOW_WIDTH // 2:
+                                    self.ai_randomness = max(0.0, self.ai_randomness - 0.05)
+                                else:
+                                    self.ai_randomness = min(1.0, self.ai_randomness + 0.05)
+                                self._apply_ai_settings_to_engine()
+                            elif i == 5:  # AI Repeat Cooldown
+                                mouse_x = mouse_pos[0]
+                                if mouse_x < WINDOW_WIDTH // 2:
+                                    self.ai_repeat_cooldown = max(1, self.ai_repeat_cooldown - 1)
+                                else:
+                                    self.ai_repeat_cooldown = min(6, self.ai_repeat_cooldown + 1)
+                                self._apply_ai_settings_to_engine()
+                            elif i == 6:  # Back
                                 self.game_state = STATE_OPTIONS
                             break
             
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_UP:
-                    self.advanced_selection = (self.advanced_selection - 1) % 4
+                    self.advanced_selection = (self.advanced_selection - 1) % 7
                 elif event.key == pygame.K_DOWN:
-                    self.advanced_selection = (self.advanced_selection + 1) % 4
+                    self.advanced_selection = (self.advanced_selection + 1) % 7
                 elif event.key == pygame.K_LEFT:
                     if self.advanced_selection == 0:  # Algorithm
                         algorithms = ["astar", "idastar", "beam_search"]
@@ -2300,6 +2520,15 @@ class VisualGame:
                         self.turn_timer = self.turn_interval * 1000
                     elif self.advanced_selection == 2:  # Decay rate - faster decay (harder)
                         self.decay_multiplier = max(0.1, self.decay_multiplier - 0.2)
+                    elif self.advanced_selection == 3:  # AI aggression
+                        self.ai_aggression = max(0.5, self.ai_aggression - 0.1)
+                        self._apply_ai_settings_to_engine()
+                    elif self.advanced_selection == 4:  # AI randomness
+                        self.ai_randomness = max(0.0, self.ai_randomness - 0.05)
+                        self._apply_ai_settings_to_engine()
+                    elif self.advanced_selection == 5:  # AI repeat cooldown
+                        self.ai_repeat_cooldown = max(1, self.ai_repeat_cooldown - 1)
+                        self._apply_ai_settings_to_engine()
                 elif event.key == pygame.K_RIGHT:
                     if self.advanced_selection == 0:  # Algorithm
                         algorithms = ["astar", "idastar", "beam_search"]
@@ -2310,8 +2539,17 @@ class VisualGame:
                         self.turn_timer = self.turn_interval * 1000
                     elif self.advanced_selection == 2:  # Decay rate - slower decay (easier)
                         self.decay_multiplier = min(3.0, self.decay_multiplier + 0.2)
+                    elif self.advanced_selection == 3:  # AI aggression
+                        self.ai_aggression = min(2.0, self.ai_aggression + 0.1)
+                        self._apply_ai_settings_to_engine()
+                    elif self.advanced_selection == 4:  # AI randomness
+                        self.ai_randomness = min(1.0, self.ai_randomness + 0.05)
+                        self._apply_ai_settings_to_engine()
+                    elif self.advanced_selection == 5:  # AI repeat cooldown
+                        self.ai_repeat_cooldown = min(6, self.ai_repeat_cooldown + 1)
+                        self._apply_ai_settings_to_engine()
                 elif event.key == pygame.K_RETURN or event.key == pygame.K_SPACE:
-                    if self.advanced_selection == 3:  # Back
+                    if self.advanced_selection == 6:  # Back
                         self.game_state = STATE_OPTIONS
                 elif event.key == pygame.K_ESCAPE:
                     self.game_state = STATE_OPTIONS
@@ -2327,6 +2565,24 @@ class VisualGame:
                             self.decay_multiplier = max(0.1, self.decay_multiplier - 0.1)  # Faster decay
                         else:  # K_EQUALS or K_PLUS
                             self.decay_multiplier = min(3.0, self.decay_multiplier + 0.1)  # Slower decay
+                    elif self.advanced_selection == 3:  # AI aggression adjustment
+                        if event.key == pygame.K_MINUS:
+                            self.ai_aggression = max(0.5, self.ai_aggression - 0.1)
+                        else:
+                            self.ai_aggression = min(2.0, self.ai_aggression + 0.1)
+                        self._apply_ai_settings_to_engine()
+                    elif self.advanced_selection == 4:  # AI randomness adjustment
+                        if event.key == pygame.K_MINUS:
+                            self.ai_randomness = max(0.0, self.ai_randomness - 0.05)
+                        else:
+                            self.ai_randomness = min(1.0, self.ai_randomness + 0.05)
+                        self._apply_ai_settings_to_engine()
+                    elif self.advanced_selection == 5:  # AI cooldown adjustment
+                        if event.key == pygame.K_MINUS:
+                            self.ai_repeat_cooldown = max(1, self.ai_repeat_cooldown - 1)
+                        else:
+                            self.ai_repeat_cooldown = min(6, self.ai_repeat_cooldown + 1)
+                        self._apply_ai_settings_to_engine()
         
         return True
     
@@ -2447,6 +2703,10 @@ class VisualGame:
             station = self._get_station_at(x, y)
             
             if station:
+                station_state = state.infrastructure.get(station.station_id, {})
+                # Failed stations are unusable until repaired.
+                if station_state.get("status") == "failed":
+                    continue
                 resource_type = station.get_resource_type()
                 current_value = agent.get(resource_type, 100.0)
                 if current_value < 100.0:

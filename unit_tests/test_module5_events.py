@@ -43,6 +43,32 @@ class TestEventResolver(unittest.TestCase):
         if event.severity > 0.7:
             self.assertIn("cascading_effects", result)
 
+    def test_station_breakdown_marks_station_failed(self):
+        """Station breakdown should mark targeted station failed and initialize repair metadata."""
+        self.state.infrastructure["oxy_station_1"] = {
+            "kind": "resource_station",
+            "station_id": "oxy_station_1",
+            "resource_type": "oxygen",
+            "center": (0, 0),
+            "size": 2,
+            "status": "operational",
+            "repair_remaining_turns": 0,
+            "repair_agent_id": None,
+        }
+        event = Event(
+            "station_breakdown",
+            "oxy_station_1",
+            0.6,
+            {},
+            "Oxygen station failure",
+            target_station_id="oxy_station_1",
+        )
+        result = self.resolver.apply_event(self.state, event)
+        station = self.state.infrastructure["oxy_station_1"]
+        self.assertEqual(result["event_applied"], "station_breakdown")
+        self.assertEqual(station.get("status"), "failed")
+        self.assertGreater(int(station.get("repair_remaining_turns", 0)), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -144,7 +144,7 @@ python -m unittest discover -v
 | ---------- | ---- | ---------------- | ------ | -------- |
 | 1 | Feb 11 | Module 1 (State), Module 2 (Search), Module 3 (Logic) | Pending |  |
 | 2 | Feb 26 | Module 2 (Search), Module 3 (Logic) | Pending |  |
-| 3 | March 19 | Module 4 (Game Theory), Module 5 (Events) | Pending |  |
+| 3 | March 19 | Module 4 (Game Theory), Module 5 (Events) | Ready | `docs/checkpoint_3_CODE_ELEGANCE_REPORT_2026-03-19.md`; `docs/checkpoint_3_SUBMISSION_NOTES_2026-03-19.md`; `docs/checkpoint_3_DEMO_SCRIPT_2026-03-19.md`; `python run_tests.py` (75/75) |
 | 4 | April 2 | Module 5 (Events), Module 6 (RL/Heuristics) | Pending |  |
 | 5 | April 16 | Module 6 (RL/Heuristics) | Pending |  |
 

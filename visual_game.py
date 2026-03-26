@@ -214,6 +214,9 @@ class VisualGame:
         self.current_event_text = None
         self.event_start_time = None
         self.event_duration = 2000  # 2 seconds
+        # Event tasks shown in Tasks tab (created from adversarial events)
+        self.event_tasks: List[Dict[str, Any]] = []
+        self.event_task_rects: List[Tuple[pygame.Rect, int]] = []  # (rect, event_task_index)
         
         # Player task queue (for assigning tasks)
         self.pending_tasks: List[Task] = []
@@ -485,6 +488,8 @@ class VisualGame:
         """Create initial game state with agents and resource stations."""
         # Clear tile cache to ensure fresh map generation
         clear_tile_cache()
+        self.event_tasks.clear()
+        self.event_task_rects.clear()
         # Generate random seed for procedural map generation
         random_seed = random.randint(0, 2**31 - 1)
         initial_state = ColonyState({"world_seed": random_seed, "difficulty": self.difficulty})
@@ -895,6 +900,47 @@ class VisualGame:
             if 0 <= screen_y <= self.camera_height:
                 pygame.draw.line(self.screen, (255, 255, 0), 
                                (0, screen_y), (self.camera_width, screen_y), 3)
+
+    def _draw_graph_location_labels(self):
+        """
+        Draw labels/markers for internal graph locations (e.g., section_alpha).
+        This makes adversarial event locations visible on the map.
+        """
+        if not self.game or not self.game.task_planner or not self.game.task_planner.graph:
+            return
+        graph = self.game.task_planner.graph
+        if not graph.node_positions:
+            return
+
+        for node_id, pos in graph.node_positions.items():
+            if not isinstance(pos, (tuple, list)) or len(pos) != 2:
+                continue
+            x, y = int(pos[0]), int(pos[1])
+            screen_x, screen_y = self._world_to_screen(x, y)
+            ts = int(self._get_scaled_tile_size())
+            margin = max(12, ts)
+            if (
+                screen_x < -margin
+                or screen_x > self.camera_width + margin
+                or screen_y < -margin
+                or screen_y > self.camera_height + margin
+            ):
+                continue
+
+            # Small marker ring at the location
+            marker_radius = max(5, ts // 5)
+            pygame.draw.circle(self.screen, (210, 210, 230), (screen_x, screen_y), marker_radius, 1)
+
+            # Label above marker (convert internal_id -> readable name)
+            label = node_id.replace("_", " ").title()
+            text = self.font_small.render(label, True, (230, 230, 245))
+            text_rect = text.get_rect(center=(screen_x, screen_y - marker_radius - 10))
+
+            # Dark backing box for readability over terrain
+            bg_rect = text_rect.inflate(6, 4)
+            pygame.draw.rect(self.screen, (25, 25, 35), bg_rect)
+            pygame.draw.rect(self.screen, (80, 80, 95), bg_rect, 1)
+            self.screen.blit(text, text_rect)
     
     def _draw_sidebar(self):
         """Draw the sidebar with tabs: Colony | Agents | Tasks."""
@@ -1091,6 +1137,7 @@ class VisualGame:
             self.recruit_button_rect = None
             self.agent_scroll_up_rect = None
             self.agent_scroll_down_rect = None
+            self.event_task_rects = []
             tasks_title = self.font.render("Active Tasks", True, COLOR_TEXT)
             self.screen.blit(tasks_title, (sidebar_x + 10, y_offset))
             y_offset += 30
@@ -1102,7 +1149,33 @@ class VisualGame:
                 text_surface = self.font_small.render(task_text, True, COLOR_TEXT)
                 self.screen.blit(text_surface, (sidebar_x + 10, y_offset))
                 y_offset += 22
-            if not state.active_tasks:
+
+            # Event tasks created from adversarial phase (click to auto-dispatch closest agent)
+            y_offset += 10
+            event_title = self.font.render("Event Tasks", True, COLOR_TEXT)
+            self.screen.blit(event_title, (sidebar_x + 10, y_offset))
+            y_offset += 24
+
+            unresolved_indices = [i for i, et in enumerate(self.event_tasks) if not et.get("resolved", False)]
+            if unresolved_indices:
+                for i in unresolved_indices:
+                    et = self.event_tasks[i]
+                    ev_type = str(et.get("event_type", "event")).replace("_", " ").title()
+                    ev_loc = et.get("location", "unknown")
+                    row_rect = pygame.Rect(sidebar_x + 8, y_offset - 2, self.sidebar_width - 16, 20)
+                    self.event_task_rects.append((row_rect, i))
+                    pygame.draw.rect(self.screen, (75, 40, 40), row_rect)
+                    pygame.draw.rect(self.screen, (200, 120, 120), row_rect, 1)
+                    row_text = f"[Click] {ev_type} @ {ev_loc}"
+                    text_surface = self.font_small.render(row_text, True, (255, 220, 220))
+                    self.screen.blit(text_surface, (sidebar_x + 12, y_offset))
+                    y_offset += 22
+            else:
+                none_text = self.font_small.render("No unresolved event tasks.", True, (140, 140, 140))
+                self.screen.blit(none_text, (sidebar_x + 10, y_offset))
+                y_offset += 22
+
+            if not state.active_tasks and not unresolved_indices:
                 no_tasks = self.font_small.render("No active tasks.", True, (140, 140, 140))
                 self.screen.blit(no_tasks, (sidebar_x + 10, y_offset))
         
@@ -1203,6 +1276,157 @@ class VisualGame:
         """Show an event notification."""
         self.current_event_text = event_description
         self.event_start_time = pygame.time.get_ticks()
+
+    def _event_location_to_world(self, location: Any) -> Optional[Tuple[int, int]]:
+        """
+        Convert an event location (node id, station id, or coordinates) to world (x, y).
+        Returns None if it cannot be mapped.
+        """
+        if location is None:
+            return None
+        if isinstance(location, (tuple, list)) and len(location) == 2:
+            try:
+                x = int(location[0])
+                y = int(location[1])
+                return (
+                    max(WORLD_MIN_X, min(WORLD_MAX_X - 1, x)),
+                    max(WORLD_MIN_Y, min(WORLD_MAX_Y - 1, y)),
+                )
+            except (TypeError, ValueError):
+                return None
+        if isinstance(location, str):
+            # Station IDs in visual layer
+            for station in self.resource_stations:
+                if station.station_id == location:
+                    return (station.center_x, station.center_y)
+            # Graph node IDs in planner
+            if self.game and self.game.task_planner and self.game.task_planner.graph:
+                node_pos = self.game.task_planner.graph.node_positions.get(location)
+                if node_pos:
+                    return (
+                        max(WORLD_MIN_X, min(WORLD_MAX_X - 1, int(node_pos[0]))),
+                        max(WORLD_MIN_Y, min(WORLD_MAX_Y - 1, int(node_pos[1]))),
+                    )
+        return None
+
+    def _add_event_task(self, event_type: str, event_location: Any):
+        """Add (or refresh) an event task entry in the Tasks tab."""
+        if not event_type:
+            return
+        # If same unresolved event+location already exists, keep a single row.
+        for task in self.event_tasks:
+            if (
+                not task.get("resolved", False)
+                and task.get("event_type") == event_type
+                and task.get("location") == event_location
+            ):
+                task["turn_seen"] = self.game.get_state().turn_number if self.game else 0
+                return
+        self.event_tasks.append(
+            {
+                "event_type": event_type,
+                "location": event_location,
+                "resolved": False,
+                "assigned_agent_id": None,
+                "turn_seen": self.game.get_state().turn_number if self.game else 0,
+            }
+        )
+
+    def _dispatch_closest_agent_to_event_task(self, event_task_index: int):
+        """Send the closest alive/reachable agent to the clicked event task location."""
+        if not self.game:
+            return
+        if event_task_index < 0 or event_task_index >= len(self.event_tasks):
+            return
+        event_task = self.event_tasks[event_task_index]
+        if event_task.get("resolved", False):
+            return
+
+        target = self._event_location_to_world(event_task.get("location"))
+        if target is None:
+            self._show_event("Event location is not reachable on map")
+            return
+        tx, ty = target
+
+        state = self.game.get_state()
+        living_agents = [a for a in state.agents if a.get("status") != "dead"]
+        if not living_agents:
+            self._show_event("No living agents to dispatch")
+            return
+
+        # Busy agents cannot be recruited for new event-response tasks.
+        # "Busy" means either currently moving on a path or assigned in active_tasks.
+        active_task_agent_ids = {
+            t.get("agent_id")
+            for t in state.active_tasks
+            if t.get("agent_id") is not None and t.get("progress", 0.0) < 1.0
+        }
+        # Repairs are tracked in infrastructure, not in active_tasks.
+        repair_agent_ids = set()
+        failed_station_tiles = set()
+        infra = state.infrastructure or {}
+        for station in self.resource_stations:
+            info = infra.get(station.station_id, {})
+            if not isinstance(info, dict):
+                continue
+            if info.get("status") != "failed":
+                continue
+            repair_agent_id = info.get("repair_agent_id")
+            if repair_agent_id is not None:
+                repair_agent_ids.add(repair_agent_id)
+            for tile_xy in station.get_tiles():
+                failed_station_tiles.add(tile_xy)
+
+        # Agents physically on failed station footprints are considered busy repairing,
+        # even if repair_agent_id has not yet been assigned this turn.
+        on_failed_station_ids = set()
+        for agent in living_agents:
+            aid = agent.get("id")
+            loc = agent.get("location")
+            if aid is None or not isinstance(loc, (tuple, list)) or len(loc) != 2:
+                continue
+            if (int(loc[0]), int(loc[1])) in failed_station_tiles:
+                on_failed_station_ids.add(aid)
+
+        available_agents = []
+        for agent in living_agents:
+            aid = agent.get("id")
+            if aid is None:
+                continue
+            path_busy = aid in self.agent_paths and len(self.agent_paths.get(aid, [])) > 0
+            task_busy = aid in active_task_agent_ids
+            repair_busy = aid in repair_agent_ids or aid in on_failed_station_ids
+            if not path_busy and not task_busy and not repair_busy:
+                available_agents.append(agent)
+
+        if not available_agents:
+            self._show_event("All agents busy")
+            return
+
+        best_agent_id: Optional[int] = None
+        best_path_len: Optional[int] = None
+        for agent in available_agents:
+            agent_id = agent.get("id")
+            if agent_id is None:
+                continue
+            path = self.game.get_path_for_agent_to_location(agent_id, tx, ty)
+            if not path:
+                continue
+            plen = len(path)
+            if best_path_len is None or plen < best_path_len:
+                best_path_len = plen
+                best_agent_id = agent_id
+
+        if best_agent_id is None:
+            self._show_event("No reachable agent for this event")
+            return
+
+        # Assign the closest agent immediately.
+        self.selected_agent_id = best_agent_id
+        self._assign_task_at(tx, ty, agent_id=best_agent_id)
+        event_task["resolved"] = True
+        event_task["assigned_agent_id"] = best_agent_id
+        self._show_event(f"Agent {best_agent_id} dispatched to event")
     
     def _draw_map(self):
         """Draw the procedural tile map (finite world with bounds)."""
@@ -1351,6 +1575,11 @@ class VisualGame:
                                 self.agent_list_scroll = max(0, self.agent_list_scroll - 1)
                             elif hasattr(self, 'agent_scroll_down_rect') and self.agent_scroll_down_rect and self.agent_scroll_down_rect.collidepoint(mouse_pos):
                                 self.agent_list_scroll = min(max(0, len(self.game.get_state().agents) - 5), self.agent_list_scroll + 1)
+                        if self.sidebar_tab == "tasks" and event.button == 1:
+                            for rect, event_idx in self.event_task_rects:
+                                if rect.collidepoint(mouse_pos):
+                                    self._dispatch_closest_agent_to_event_task(event_idx)
+                                    break
                         if self.sidebar_tab == "colony" and hasattr(self, 'recruit_button_rect') and self.recruit_button_rect and self.recruit_button_rect.collidepoint(mouse_pos):
                             self._recruit_agent()
                 
@@ -1877,10 +2106,13 @@ class VisualGame:
             # Show event notification
             event_info = turn_report.get("phases", {}).get("adversarial", {})
             event_type = event_info.get("event_selected", "")
-            event_location = event_info.get("location", "")
+            # Prefer concrete station target if provided (station_breakdown),
+            # fall back to generic event location for other events.
+            event_location = event_info.get("target_station_id") or event_info.get("location", "")
             if event_type:
                 event_desc = f"{event_type.upper()} at {event_location}"
                 self._show_event(event_desc)
+                self._add_event_task(event_type, event_location)
             
             # Check for game over (only after a turn, so player sees why)
             if self.game.is_game_over():
@@ -2605,7 +2837,12 @@ class VisualGame:
                 if agent_id is not None:
                     self.agent_powerups.setdefault(agent_id, set()).add(p.powerup_type)
                     to_remove.append(p)
-                    self._show_event("Auto-walk powerup collected!")
+                    powerup_name = {
+                        POWERUP_AUTO_OXYGEN: "Auto Oxygen",
+                        POWERUP_AUTO_CALORIES: "Auto Calories",
+                        POWERUP_AUTO_INTEGRITY: "Auto Integrity",
+                    }.get(p.powerup_type, "Auto-walk")
+                    self._show_event(f"{powerup_name} powerup collected!")
                 break
         self.powerups = [p for p in self.powerups if p not in to_remove]
     
@@ -2777,6 +3014,7 @@ class VisualGame:
                 # Draw paused gameplay in background + overlay
                 if self.game:
                     self._draw_map()
+                    self._draw_graph_location_labels()
                     self._draw_resource_stations()
                     self._draw_powerups()
                     self._draw_task_destinations()
@@ -2811,6 +3049,7 @@ class VisualGame:
                         self.hovered_agent_id = None
                     # Draw everything
                     self._draw_map()
+                    self._draw_graph_location_labels()
                     self._draw_resource_stations()
                     self._draw_powerups()
                     self._draw_task_destinations()

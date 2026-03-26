@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Game Engine
 
@@ -170,6 +172,8 @@ class GameEngine:
             "event_selected": selected_event.event_type,
             "location": selected_event.location,
             "severity": selected_event.severity,
+            # For station_breakdown, this is the concrete station target.
+            "target_station_id": selected_event.target_station_id,
         }
         return selected_event, summary
 

@@ -2565,13 +2565,16 @@ class VisualGame:
                 img = self.img_powerup_int
 
             if img is not None:
-                size = max(16, int(ts * 0.8))
+                size = max(20, int(ts * 1.05))
                 scaled = pygame.transform.smoothscale(img, (size, size))
                 rect = scaled.get_rect(center=(screen_x, screen_y))
+                # Soft outer ring to improve visibility on busy terrain.
+                ring_radius = max(10, size // 2 + 3)
+                pygame.draw.circle(self.screen, (255, 245, 170), (screen_x, screen_y), ring_radius, 2)
                 self.screen.blit(scaled, rect)
             else:
                 # Fallback: colored circles with letters
-                radius = max(6, ts // 3)
+                radius = max(8, int(ts * 0.42))
                 if p.powerup_type == POWERUP_AUTO_OXYGEN:
                     color = COLOR_STATION_OXYGEN
                     icon = "O"
@@ -2581,6 +2584,7 @@ class VisualGame:
                 else:
                     color = COLOR_STATION_INTEGRITY
                     icon = "R"
+                pygame.draw.circle(self.screen, (255, 245, 170), (screen_x, screen_y), radius + 3, 2)
                 pygame.draw.circle(self.screen, color, (screen_x, screen_y), radius)
                 pygame.draw.circle(self.screen, (255, 255, 255), (screen_x, screen_y), radius, 2)
                 text = self.font_small.render(icon, True, (255, 255, 255))

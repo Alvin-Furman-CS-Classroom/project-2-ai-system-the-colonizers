@@ -43,6 +43,14 @@ WORLD_MIN_X = -WORLD_WIDTH // 2
 WORLD_MAX_X = WORLD_WIDTH // 2
 WORLD_MIN_Y = -WORLD_HEIGHT // 2
 WORLD_MAX_Y = WORLD_HEIGHT // 2
+MAP_SIZE_PRESETS = [
+    ("Small", 40),
+    ("Medium", 50),
+    ("Large", 60),
+    ("XL", 100),
+    ("XXL", 150),
+    ("Max Test", 250),
+]
 
 # Colors
 COLOR_GRASS = (34, 139, 34)
@@ -133,6 +141,7 @@ class ResourceStation:
             "size": self.size,
             "tiles": self.get_tiles(),
             "status": "operational",
+            "warning_turns_remaining": 0,
             "repair_remaining_turns": 0,
             "repair_total_turns": 0,
             "repair_agent_id": None,
@@ -240,7 +249,7 @@ class VisualGame:
         # Menu navigation
         self.menu_selection = 0  # 0 = New Game, 1 = Options, 2 = Quit
         self.options_selection = 0  # 0 = Difficulty, 1 = Advanced, 2 = Controls, 3 = Back
-        self.advanced_selection = 0  # 0=Algorithm, 1=Turn Speed, 2=Decay, 3=AI Aggro, 4=AI Random, 5=AI Cooldown, 6=Back
+        self.advanced_selection = 0  # 0=Algorithm, 1=Turn Speed, 2=Decay, 3=AI Aggro, 4=AI Random, 5=AI Cooldown, 6=Map Size, 7=Back
         self.difficulty_selection = 1  # 0 = Easy, 1 = Normal, 2 = Hard
         self.algorithm_selection = 0  # 0 = A*, 1 = IDA*, 2 = Beam Search
         self.starting_agents = 2  # 1-5, selected at new game setup
@@ -251,6 +260,8 @@ class VisualGame:
         self.ai_aggression = 1.0
         self.ai_randomness = 0.4
         self.ai_repeat_cooldown = 3
+        self.map_size_index = 1  # 0=Small, 1=Medium, 2=Large
+        self._set_world_size(MAP_SIZE_PRESETS[self.map_size_index][1])
         self._apply_difficulty_defaults()
         
         # Fullscreen mode
@@ -377,6 +388,19 @@ class VisualGame:
             print("Failed to load powerup_auto_integrity.png:", e)
             self.img_powerup_int = None
     
+    def _set_world_size(self, size_tiles: int) -> None:
+        """Apply a world-size preset by updating module-level world bounds."""
+        global WORLD_WIDTH, WORLD_HEIGHT, WORLD_MIN_X, WORLD_MAX_X, WORLD_MIN_Y, WORLD_MAX_Y
+        size = max(30, min(250, int(size_tiles)))
+        if size % 2 != 0:
+            size += 1
+        WORLD_WIDTH = size
+        WORLD_HEIGHT = size
+        WORLD_MIN_X = -WORLD_WIDTH // 2
+        WORLD_MAX_X = WORLD_WIDTH // 2
+        WORLD_MIN_Y = -WORLD_HEIGHT // 2
+        WORLD_MAX_Y = WORLD_HEIGHT // 2
+
     def _choose_station_placements(self, state: ColonyState, stage_index: int) -> List[ResourceStation]:
         """
         Choose valid, non-overlapping positions for resource stations using deterministic RNG.
@@ -403,6 +427,8 @@ class VisualGame:
                     return False
                 tile = state.get_tile_at(tx, ty)
                 if not tile.get("passable", True):
+                    return False
+                if tile.get("terrain") == "water":
                     return False
             return True
         
@@ -610,6 +636,9 @@ class VisualGame:
             merged = station.to_infrastructure_dict()
             # Preserve runtime fields when re-syncing (e.g., after load/stage updates)
             merged["status"] = existing.get("status", merged["status"])
+            merged["warning_turns_remaining"] = existing.get(
+                "warning_turns_remaining", merged["warning_turns_remaining"]
+            )
             merged["repair_remaining_turns"] = existing.get(
                 "repair_remaining_turns", merged["repair_remaining_turns"]
             )
@@ -906,41 +935,8 @@ class VisualGame:
         Draw labels/markers for internal graph locations (e.g., section_alpha).
         This makes adversarial event locations visible on the map.
         """
-        if not self.game or not self.game.task_planner or not self.game.task_planner.graph:
-            return
-        graph = self.game.task_planner.graph
-        if not graph.node_positions:
-            return
-
-        for node_id, pos in graph.node_positions.items():
-            if not isinstance(pos, (tuple, list)) or len(pos) != 2:
-                continue
-            x, y = int(pos[0]), int(pos[1])
-            screen_x, screen_y = self._world_to_screen(x, y)
-            ts = int(self._get_scaled_tile_size())
-            margin = max(12, ts)
-            if (
-                screen_x < -margin
-                or screen_x > self.camera_width + margin
-                or screen_y < -margin
-                or screen_y > self.camera_height + margin
-            ):
-                continue
-
-            # Small marker ring at the location
-            marker_radius = max(5, ts // 5)
-            pygame.draw.circle(self.screen, (210, 210, 230), (screen_x, screen_y), marker_radius, 1)
-
-            # Label above marker (convert internal_id -> readable name)
-            label = node_id.replace("_", " ").title()
-            text = self.font_small.render(label, True, (230, 230, 245))
-            text_rect = text.get_rect(center=(screen_x, screen_y - marker_radius - 10))
-
-            # Dark backing box for readability over terrain
-            bg_rect = text_rect.inflate(6, 4)
-            pygame.draw.rect(self.screen, (25, 25, 35), bg_rect)
-            pygame.draw.rect(self.screen, (80, 80, 95), bg_rect, 1)
-            self.screen.blit(text, text_rect)
+        # Disaster node circles/labels disabled per UX request.
+        return
     
     def _draw_sidebar(self):
         """Draw the sidebar with tabs: Colony | Agents | Tasks."""
@@ -1245,28 +1241,50 @@ class VisualGame:
                 center_x = self.camera_width // 2
                 center_y = self.camera_height // 2
 
-                # Render main text and a soft shadow
-                text_surface = self.font_large.render(self.current_event_text, True, COLOR_EVENT_TEXT)
-                shadow_surface = self.font_large.render(self.current_event_text, True, (0, 0, 0))
-                text_rect = text_surface.get_rect(center=(center_x, center_y))
-                shadow_rect = shadow_surface.get_rect(center=(center_x + 2, center_y + 2))
+                # Render alert panel with better contrast and wrapped text for readability.
+                body_max_w = int(self.camera_width * 0.78)
+                words = str(self.current_event_text).split()
+                lines: List[str] = []
+                current_line = ""
+                for word in words:
+                    test_line = f"{current_line} {word}".strip()
+                    if self.font.size(test_line)[0] <= body_max_w:
+                        current_line = test_line
+                    else:
+                        if current_line:
+                            lines.append(current_line)
+                        current_line = word
+                if current_line:
+                    lines.append(current_line)
+                if not lines:
+                    lines = [str(self.current_event_text)]
 
-                # Background box behind text for readability
-                padding_x, padding_y = 20, 10
-                bg_rect = pygame.Rect(
-                    text_rect.left - padding_x,
-                    text_rect.top - padding_y,
-                    text_rect.width + 2 * padding_x,
-                    text_rect.height + 2 * padding_y,
-                )
-                # Slightly transparent dark box
-                bg_surface = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
-                bg_surface.fill((0, 0, 0, 170))
-                self.screen.blit(bg_surface, (bg_rect.x, bg_rect.y))
+                title_surface = self.font_large.render("ALERT", True, (255, 245, 245))
+                body_surfaces = [self.font.render(line, True, (255, 235, 235)) for line in lines[:3]]
+                title_h = title_surface.get_height()
+                body_h = sum(s.get_height() for s in body_surfaces) + max(0, len(body_surfaces) - 1) * 4
+                panel_w = max(
+                    title_surface.get_width(),
+                    max((s.get_width() for s in body_surfaces), default=0),
+                ) + 36
+                panel_h = title_h + body_h + 30
+                panel_rect = pygame.Rect(0, 0, panel_w, panel_h)
+                panel_rect.center = (center_x, center_y)
 
-                # Draw shadow then text
-                self.screen.blit(shadow_surface, shadow_rect)
-                self.screen.blit(text_surface, text_rect)
+                # Dark translucent panel + red border improves readability on any background.
+                panel_surface = pygame.Surface((panel_rect.width, panel_rect.height), pygame.SRCALPHA)
+                panel_surface.fill((20, 8, 8, 220))
+                self.screen.blit(panel_surface, panel_rect.topleft)
+                pygame.draw.rect(self.screen, (235, 80, 80), panel_rect, 3, border_radius=6)
+                pygame.draw.rect(self.screen, (120, 35, 35), panel_rect.inflate(-10, -10), 1, border_radius=6)
+
+                title_rect = title_surface.get_rect(midtop=(panel_rect.centerx, panel_rect.top + 10))
+                self.screen.blit(title_surface, title_rect)
+                y = title_rect.bottom + 6
+                for s in body_surfaces:
+                    r = s.get_rect(midtop=(panel_rect.centerx, y))
+                    self.screen.blit(s, r)
+                    y += s.get_height() + 4
             else:
                 # Clear event after duration
                 self.current_event_text = None
@@ -1460,6 +1478,22 @@ class VisualGame:
         
         # Draw world boundary indicators
         self._draw_world_bounds()
+
+    def _toggle_fullscreen(self) -> None:
+        """Toggle fullscreen mode and refresh dynamic layout dimensions."""
+        self.fullscreen = not self.fullscreen
+        if self.fullscreen:
+            self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+            self.window_width, self.window_height = self.screen.get_size()
+            self.camera_width = int(self.window_width * 0.7)
+            self.sidebar_width = self.window_width - self.camera_width
+            self.camera_height = self.window_height
+        else:
+            self.screen = pygame.display.set_mode(self.original_size)
+            self.window_width, self.window_height = self.original_size
+            self.camera_width = CAMERA_WIDTH
+            self.camera_height = CAMERA_HEIGHT
+            self.sidebar_width = SIDEBAR_WIDTH
     
     def _handle_input(self):
         """Handle keyboard and mouse input."""
@@ -1533,21 +1567,7 @@ class VisualGame:
             
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_F11:
-                    # Toggle fullscreen
-                    self.fullscreen = not self.fullscreen
-                    if self.fullscreen:
-                        self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-                        # Update window dimensions
-                        self.window_width, self.window_height = self.screen.get_size()
-                        self.camera_width = int(self.window_width * 0.7)  # 70% for game area
-                        self.sidebar_width = self.window_width - self.camera_width
-                        self.camera_height = self.window_height
-                    else:
-                        self.screen = pygame.display.set_mode(self.original_size)
-                        self.window_width, self.window_height = self.original_size
-                        self.camera_width = CAMERA_WIDTH
-                        self.camera_height = CAMERA_HEIGHT
-                        self.sidebar_width = SIDEBAR_WIDTH
+                    self._toggle_fullscreen()
                 elif event.key == pygame.K_ESCAPE:
                     # Open confirmation overlay instead of instantly quitting
                     self.confirm_quit_selection = 0
@@ -2105,14 +2125,26 @@ class VisualGame:
             
             # Show event notification
             event_info = turn_report.get("phases", {}).get("adversarial", {})
+            resolution_info = turn_report.get("phases", {}).get("resolution", {})
+            specific_effects = resolution_info.get("specific_effects", {})
             event_type = event_info.get("event_selected", "")
             # Prefer concrete station target if provided (station_breakdown),
             # fall back to generic event location for other events.
             event_location = event_info.get("target_station_id") or event_info.get("location", "")
+            target_agent_id = event_info.get("target_agent_id")
             if event_type:
                 event_desc = f"{event_type.upper()} at {event_location}"
+                if event_type == "station_breakdown":
+                    status = specific_effects.get("status")
+                    if status == "warning":
+                        event_desc = f"STATION WARNING at {event_location}"
+                    elif status == "failed":
+                        event_desc = f"STATION BREAKDOWN at {event_location}"
+                elif isinstance(target_agent_id, int):
+                    event_desc = f"{event_type.upper()} on AGENT {target_agent_id}"
                 self._show_event(event_desc)
-                self._add_event_task(event_type, event_location)
+                if event_type == "station_breakdown":
+                    self._add_event_task(event_type, event_location)
             
             # Check for game over (only after a turn, so player sees why)
             if self.game.is_game_over():
@@ -2170,6 +2202,7 @@ class VisualGame:
         # Options
         options_list = [
             f"Difficulty: {self.difficulty.capitalize()}",
+            f"Fullscreen: {'On' if self.fullscreen else 'Off'}",
             "Advanced",
             "Controls",
             "Back"
@@ -2216,6 +2249,8 @@ class VisualGame:
         ai_aggression_text = f"AI Aggression: {self.ai_aggression:.2f}x"
         ai_randomness_text = f"AI Randomness: {self.ai_randomness:.2f}"
         ai_cooldown_text = f"AI Repeat Cooldown: {self.ai_repeat_cooldown} turns"
+        map_size_name, map_size_tiles = MAP_SIZE_PRESETS[self.map_size_index]
+        map_size_text = f"Map Size: {map_size_name} ({map_size_tiles}x{map_size_tiles})"
         
         options_list = [
             algo_text,
@@ -2224,10 +2259,11 @@ class VisualGame:
             ai_aggression_text,
             ai_randomness_text,
             ai_cooldown_text,
+            map_size_text,
             "Back"
         ]
         # Rows that use left/right click to adjust (show split)
-        slider_rows = {1, 2, 3, 4, 5}
+        slider_rows = {1, 2, 3, 4, 5, 6}
         
         y_start = 200
         self.advanced_button_rects = []
@@ -2301,6 +2337,10 @@ class VisualGame:
             y = y_start + len(options_list) * 56 + 20
             txt = self.font_small.render("- = less cooldown  + = more cooldown  Range: 1-6 turns", True, COLOR_TEXT)
             self.screen.blit(txt, txt.get_rect(center=(WINDOW_WIDTH // 2, y)))
+        if self.advanced_selection == 6:
+            y = y_start + len(options_list) * 56 + 20
+            txt = self.font_small.render("- / + = Small / Medium / Large map", True, COLOR_TEXT)
+            self.screen.blit(txt, txt.get_rect(center=(WINDOW_WIDTH // 2, y)))
     
     def _draw_controls(self):
         """Draw controls help screen."""
@@ -2370,7 +2410,9 @@ class VisualGame:
             if not tiles:
                 continue
             station_state = self._get_station_state(station)
-            is_failed = station_state.get("status") == "failed"
+            station_status = station_state.get("status", "operational")
+            is_warning = station_status == "warning"
+            is_failed = station_status == "failed"
             center_screen_x, center_screen_y = self._world_to_screen(station.center_x, station.center_y)
 
             # Prefer textured buildings if available
@@ -2411,6 +2453,11 @@ class VisualGame:
                             rect.bottomleft,
                             max(2, ts // 10),
                         )
+                    elif is_warning:
+                        overlay = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+                        overlay.fill((255, 220, 70, 90))
+                        self.screen.blit(overlay, rect.topleft)
+                        pygame.draw.rect(self.screen, (255, 220, 80), rect, max(2, ts // 10))
             else:
                 # Fallback: colored rectangles as before
                 if station.station_type == STATION_OXYGEN:
@@ -2429,6 +2476,22 @@ class VisualGame:
                             if is_failed:
                                 pygame.draw.line(self.screen, (255, 80, 80), rect.topleft, rect.bottomright, 2)
                                 pygame.draw.line(self.screen, (255, 80, 80), rect.topright, rect.bottomleft, 2)
+                            elif is_warning:
+                                pygame.draw.rect(self.screen, (255, 220, 80), rect, 2)
+
+            # Warning indicator for stations about to fail.
+            if is_warning and -ts <= center_screen_x <= self.camera_width + ts and -ts <= center_screen_y <= self.camera_height + ts:
+                warn = self.font_small.render("BREAKDOWN WARNING", True, (255, 230, 120))
+                w1 = warn.get_rect(center=(center_screen_x, center_screen_y - max(20, ts)))
+                bg = pygame.Rect(
+                    center_screen_x - w1.width // 2 - 6,
+                    w1.top - 3,
+                    w1.width + 12,
+                    w1.height + 8,
+                )
+                pygame.draw.rect(self.screen, (40, 32, 8), bg)
+                pygame.draw.rect(self.screen, (140, 110, 30), bg, 1)
+                self.screen.blit(warn, w1)
 
             # Repair status indicator for failed stations (active vs paused + continuous progress)
             if is_failed and -ts <= center_screen_x <= self.camera_width + ts and -ts <= center_screen_y <= self.camera_height + ts:
@@ -2650,30 +2713,34 @@ class VisualGame:
                                 self.difficulty_selection = (self.difficulty_selection + 1) % 3
                                 self.difficulty = difficulties[self.difficulty_selection]
                                 self._apply_difficulty_defaults()
-                            elif i == 1:  # Advanced
+                            elif i == 1:  # Fullscreen
+                                self._toggle_fullscreen()
+                            elif i == 2:  # Advanced
                                 self.game_state = STATE_ADVANCED
-                            elif i == 2:  # Controls
+                            elif i == 3:  # Controls
                                 self.game_state = STATE_CONTROLS
-                            elif i == 3:  # Back
+                            elif i == 4:  # Back
                                 self.game_state = STATE_MENU
                             break
             
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_UP:
-                    self.options_selection = (self.options_selection - 1) % 4
+                    self.options_selection = (self.options_selection - 1) % 5
                 elif event.key == pygame.K_DOWN:
-                    self.options_selection = (self.options_selection + 1) % 4
+                    self.options_selection = (self.options_selection + 1) % 5
                 elif event.key == pygame.K_RETURN or event.key == pygame.K_SPACE:
                     if self.options_selection == 0:  # Difficulty
                         difficulties = ["easy", "normal", "hard"]
                         self.difficulty_selection = (self.difficulty_selection + 1) % 3
                         self.difficulty = difficulties[self.difficulty_selection]
                         self._apply_difficulty_defaults()
-                    elif self.options_selection == 1:  # Advanced
+                    elif self.options_selection == 1:  # Fullscreen
+                        self._toggle_fullscreen()
+                    elif self.options_selection == 2:  # Advanced
                         self.game_state = STATE_ADVANCED
-                    elif self.options_selection == 2:  # Controls
+                    elif self.options_selection == 3:  # Controls
                         self.game_state = STATE_CONTROLS
-                    elif self.options_selection == 3:  # Back
+                    elif self.options_selection == 4:  # Back
                         self.game_state = STATE_MENU
                 elif event.key == pygame.K_ESCAPE:
                     self.game_state = STATE_MENU
@@ -2733,15 +2800,22 @@ class VisualGame:
                                 else:
                                     self.ai_repeat_cooldown = min(6, self.ai_repeat_cooldown + 1)
                                 self._apply_ai_settings_to_engine()
-                            elif i == 6:  # Back
+                            elif i == 6:  # Map size
+                                mouse_x = mouse_pos[0]
+                                if mouse_x < WINDOW_WIDTH // 2:
+                                    self.map_size_index = max(0, self.map_size_index - 1)
+                                else:
+                                    self.map_size_index = min(len(MAP_SIZE_PRESETS) - 1, self.map_size_index + 1)
+                                self._set_world_size(MAP_SIZE_PRESETS[self.map_size_index][1])
+                            elif i == 7:  # Back
                                 self.game_state = STATE_OPTIONS
                             break
             
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_UP:
-                    self.advanced_selection = (self.advanced_selection - 1) % 7
+                    self.advanced_selection = (self.advanced_selection - 1) % 8
                 elif event.key == pygame.K_DOWN:
-                    self.advanced_selection = (self.advanced_selection + 1) % 7
+                    self.advanced_selection = (self.advanced_selection + 1) % 8
                 elif event.key == pygame.K_LEFT:
                     if self.advanced_selection == 0:  # Algorithm
                         algorithms = ["astar", "idastar", "beam_search"]
@@ -2761,6 +2835,9 @@ class VisualGame:
                     elif self.advanced_selection == 5:  # AI repeat cooldown
                         self.ai_repeat_cooldown = max(1, self.ai_repeat_cooldown - 1)
                         self._apply_ai_settings_to_engine()
+                    elif self.advanced_selection == 6:  # Map size
+                        self.map_size_index = max(0, self.map_size_index - 1)
+                        self._set_world_size(MAP_SIZE_PRESETS[self.map_size_index][1])
                 elif event.key == pygame.K_RIGHT:
                     if self.advanced_selection == 0:  # Algorithm
                         algorithms = ["astar", "idastar", "beam_search"]
@@ -2780,8 +2857,11 @@ class VisualGame:
                     elif self.advanced_selection == 5:  # AI repeat cooldown
                         self.ai_repeat_cooldown = min(6, self.ai_repeat_cooldown + 1)
                         self._apply_ai_settings_to_engine()
+                    elif self.advanced_selection == 6:  # Map size
+                        self.map_size_index = min(len(MAP_SIZE_PRESETS) - 1, self.map_size_index + 1)
+                        self._set_world_size(MAP_SIZE_PRESETS[self.map_size_index][1])
                 elif event.key == pygame.K_RETURN or event.key == pygame.K_SPACE:
-                    if self.advanced_selection == 6:  # Back
+                    if self.advanced_selection == 7:  # Back
                         self.game_state = STATE_OPTIONS
                 elif event.key == pygame.K_ESCAPE:
                     self.game_state = STATE_OPTIONS
@@ -2815,6 +2895,12 @@ class VisualGame:
                         else:
                             self.ai_repeat_cooldown = min(6, self.ai_repeat_cooldown + 1)
                         self._apply_ai_settings_to_engine()
+                    elif self.advanced_selection == 6:  # Map size adjustment
+                        if event.key == pygame.K_MINUS:
+                            self.map_size_index = max(0, self.map_size_index - 1)
+                        else:
+                            self.map_size_index = min(len(MAP_SIZE_PRESETS) - 1, self.map_size_index + 1)
+                        self._set_world_size(MAP_SIZE_PRESETS[self.map_size_index][1])
         
         return True
     

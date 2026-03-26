@@ -34,6 +34,7 @@ class Event:
     resource_impact: Dict[str, float]  # Changes to resources
     description: str
     target_station_id: Optional[str] = None
+    target_agent_id: Optional[int] = None
 
 
 class AIDirector:
@@ -158,6 +159,7 @@ class AIDirector:
         iso = self._isolation_scores(state)
         stations = self._resource_stations(state)
         operational_stations = [s for s in stations if s.get("status") != "failed"]
+        living_agents = [a for a in state.agents if a.get("status") != "dead" and a.get("id") is not None]
 
         # Resource pressure + map isolation
         weakness_by_resource: Dict[str, float] = {}
@@ -166,15 +168,33 @@ class AIDirector:
             resource_pressure = max(0.0, min(1.0, (100.0 - level) / 100.0))
             weakness_by_resource[r] = 0.65 * resource_pressure + 0.35 * iso.get(r, 0.0)
 
-        # Resource-targeting candidates from catalog
+        # Agent-targeting hazard candidates from catalog templates
         for event in self.available_events:
-            base = 0.1
-            for r, impact in (event.resource_impact or {}).items():
-                if impact < 0:
-                    base += abs(impact) * weakness_by_resource.get(r, 0.0) / 40.0
-            # Favor stronger events slightly, but keep bounded
-            base *= 1.0 + (event.severity * 0.5)
-            candidates.append((event, base * self.aggression))
+            if not living_agents:
+                break
+            target_resource = ""
+            if event.resource_impact:
+                target_resource = max(event.resource_impact, key=lambda k: abs(event.resource_impact.get(k, 0.0)))
+            for agent in living_agents:
+                base = 0.1
+                agent_pressure = 0.0
+                if target_resource:
+                    level = float(agent.get(target_resource, 100.0))
+                    agent_pressure = max(0.0, min(1.0, (100.0 - level) / 100.0))
+                    base += abs(float(event.resource_impact.get(target_resource, 0.0))) * (
+                        0.6 * agent_pressure + 0.4 * weakness_by_resource.get(target_resource, 0.0)
+                    ) / 40.0
+                base *= 1.0 + (event.severity * 0.5)
+                agent_event = Event(
+                    event_type=event.event_type,
+                    location=f"agent_{int(agent.get('id'))}",
+                    severity=min(1.0, event.severity + (0.15 * agent_pressure)),
+                    resource_impact=dict(event.resource_impact or {}),
+                    description=event.description,
+                    target_station_id=None,
+                    target_agent_id=int(agent.get("id")),
+                )
+                candidates.append((agent_event, base * self.aggression))
 
         # Add station_breakdown candidates dynamically for operational stations
         for s in operational_stations:

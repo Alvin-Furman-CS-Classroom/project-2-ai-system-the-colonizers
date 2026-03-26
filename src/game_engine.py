@@ -56,25 +56,25 @@ class GameEngine:
         """Create default catalog of available events."""
         return [
             Event(
-                event_type="hull_breach",
-                location="section_alpha",
+                event_type="agent_trip_over_rock",
+                location="agent",
                 severity=0.5,
-                resource_impact={"oxygen": -20.0},
-                description="Hull breach in section alpha"
+                resource_impact={"integrity": -22.0},
+                description="Agent trips over rough terrain and damages equipment",
             ),
             Event(
-                event_type="resource_shortage",
-                location="storage",
-                severity=0.3,
-                resource_impact={"calories": -15.0},
-                description="Resource shortage in storage"
+                event_type="agent_oxygen_tank_puncture",
+                location="agent",
+                severity=0.45,
+                resource_impact={"oxygen": -26.0},
+                description="An agent's oxygen tank is punctured",
             ),
             Event(
-                event_type="equipment_failure",
-                location="life_support",
+                event_type="agent_ration_spoilage",
+                location="agent",
                 severity=0.4,
-                resource_impact={"integrity": -10.0},
-                description="Life support equipment failure"
+                resource_impact={"calories": -24.0},
+                description="An agent's ration pack spoils unexpectedly",
             ),
         ]
 
@@ -174,6 +174,7 @@ class GameEngine:
             "severity": selected_event.severity,
             # For station_breakdown, this is the concrete station target.
             "target_station_id": selected_event.target_station_id,
+            "target_agent_id": selected_event.target_agent_id,
         }
         return selected_event, summary
 
@@ -228,6 +229,10 @@ class GameEngine:
         # Phase 1: Logic - Rule Enforcement (Module 3)
         logic_result = self.run_logic_phase()
         turn_report["phases"]["logic"] = logic_result
+
+        # Warning-stage stations tick down to full breakdown.
+        warning_result = self._advance_station_failure_warnings()
+        turn_report["phases"]["warning_progression"] = warning_result
 
         # Station repair progression (player-driven, time-based; scales with agents present)
         repair_result = self._advance_station_repairs()
@@ -369,6 +374,32 @@ class GameEngine:
                 repaired.append(station_id)
 
         return {"repaired": repaired, "progressed": progressed, "paused": paused}
+
+    def _advance_station_failure_warnings(self) -> Dict[str, Any]:
+        """Advance warning stations and escalate to failed when timer expires."""
+        escalated: List[str] = []
+        ticking: List[Dict[str, Any]] = []
+        infra = self.state.infrastructure or {}
+        for station in self._resource_stations():
+            if station["status"] != "warning":
+                continue
+            station_id = station["station_id"]
+            info = infra.get(station_id)
+            if not isinstance(info, dict):
+                continue
+            remaining = max(0, int(info.get("warning_turns_remaining", 1)) - 1)
+            info["warning_turns_remaining"] = remaining
+            ticking.append({"station_id": station_id, "warning_turns_remaining": remaining})
+            if remaining <= 0:
+                info["status"] = "failed"
+                info["warning_turns_remaining"] = 0
+                if int(info.get("repair_remaining_turns", 0)) <= 0:
+                    info["repair_remaining_turns"] = BASE_REPAIR_TURNS
+                if int(info.get("repair_total_turns", 0)) <= 0:
+                    info["repair_total_turns"] = BASE_REPAIR_TURNS
+                info["repair_agent_id"] = None
+                escalated.append(station_id)
+        return {"warning_ticking": ticking, "escalated_to_failed": escalated}
     
     def _is_tile_passable(self, x: int, y: int, exclude_agent_id: Optional[int] = None) -> bool:
         """

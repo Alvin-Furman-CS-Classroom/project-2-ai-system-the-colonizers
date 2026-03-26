@@ -13,9 +13,15 @@ from src.module1_state.colony_state import ColonyState
 from src.module4_game_theory.ai_director import Event
 
 BASE_REPAIR_TURNS = 5
+WARNING_TO_FAILURE_TURNS = 1
 PER_AGENT_DEPLETION_PERCENT_MULTIPLIER = 1.2
 PER_AGENT_DEPLETION_PERCENT_MIN = 0.10
 PER_AGENT_DEPLETION_PERCENT_MAX = 0.60
+AGENT_HAZARD_TYPES = {
+    "agent_trip_over_rock",
+    "agent_oxygen_tank_puncture",
+    "agent_ration_spoilage",
+}
 
 
 class EventResolver:
@@ -45,6 +51,9 @@ class EventResolver:
             "resource_shortage": self._handle_resource_shortage,
             "equipment_failure": self._handle_equipment_failure,
             "station_breakdown": self._handle_station_breakdown,
+            "agent_trip_over_rock": self._handle_agent_trip_over_rock,
+            "agent_oxygen_tank_puncture": self._handle_agent_oxygen_tank_puncture,
+            "agent_ration_spoilage": self._handle_agent_ration_spoilage,
             # Add more event handlers as needed
         }
     
@@ -62,10 +71,11 @@ class EventResolver:
         Returns:
             Report of changes made
         """
-        # Apply direct resource impacts
-        colony_state.consume_resources(event.resource_impact)
-        # Resource-depleting events should also hit each living agent's personal resources.
-        self._apply_agent_resource_depletion(colony_state, event)
+        # Agent hazards target one specific agent, not global state pools.
+        if event.event_type not in AGENT_HAZARD_TYPES:
+            colony_state.consume_resources(event.resource_impact)
+            # Resource-depleting events should also hit each living agent's personal resources.
+            self._apply_agent_resource_depletion(colony_state, event)
         
         # Apply event-specific effects
         handler = self.event_handlers.get(event.event_type, self._handle_generic)
@@ -229,7 +239,20 @@ class EventResolver:
         if not isinstance(station, dict) or station.get("kind") != "resource_station":
             return {"error": f"Invalid station target: {station_id}"}
 
+        prior_status = station.get("status", "operational")
+        if prior_status == "operational":
+            # Stage 1: visible warning state before full breakdown.
+            station["status"] = "warning"
+            station["warning_turns_remaining"] = WARNING_TO_FAILURE_TURNS
+            return {
+                "station_id": station_id,
+                "status": station["status"],
+                "warning_turns_remaining": station["warning_turns_remaining"],
+            }
+
+        # Stage 2: full breakdown (either already warning or directly escalated).
         station["status"] = "failed"
+        station["warning_turns_remaining"] = 0
         if int(station.get("repair_remaining_turns", 0)) <= 0:
             station["repair_remaining_turns"] = BASE_REPAIR_TURNS
         station["repair_total_turns"] = max(
@@ -243,6 +266,62 @@ class EventResolver:
             "status": station["status"],
             "repair_remaining_turns": station["repair_remaining_turns"],
         }
+
+    def _resolve_target_agent_id(self, colony_state: ColonyState, event: Event, resource: str) -> Any:
+        """Pick explicit target agent id or fallback to weakest living agent in a resource."""
+        if event.target_agent_id is not None:
+            return int(event.target_agent_id)
+        living = [a for a in colony_state.agents if a.get("status") != "dead" and a.get("id") is not None]
+        if not living:
+            return None
+        weakest = min(living, key=lambda a: float(a.get(resource, 100.0)))
+        return int(weakest.get("id"))
+
+    def _apply_targeted_agent_impact(
+        self, colony_state: ColonyState, event: Event, resource: str, base_impact: float
+    ) -> Dict[str, Any]:
+        """Apply a negative impact to one targeted living agent's resource."""
+        target_id = self._resolve_target_agent_id(colony_state, event, resource)
+        if target_id is None:
+            return {"error": "No living agent available"}
+        magnitude = abs(float(base_impact)) * (0.8 + (0.6 * float(event.severity)))
+        applied = -magnitude
+        ok = colony_state.consume_agent_resources(target_id, {resource: applied})
+        if not ok:
+            return {"error": f"Target agent not found: {target_id}"}
+        return {
+            "target_agent_id": target_id,
+            "resource": resource,
+            "applied_delta": applied,
+            "severity": event.severity,
+        }
+
+    def _handle_agent_trip_over_rock(self, colony_state: ColonyState, event: Event) -> Dict[str, Any]:
+        """Targeted integrity damage to one agent."""
+        return self._apply_targeted_agent_impact(
+            colony_state,
+            event,
+            resource="integrity",
+            base_impact=float((event.resource_impact or {}).get("integrity", -20.0)),
+        )
+
+    def _handle_agent_oxygen_tank_puncture(self, colony_state: ColonyState, event: Event) -> Dict[str, Any]:
+        """Targeted oxygen damage to one agent."""
+        return self._apply_targeted_agent_impact(
+            colony_state,
+            event,
+            resource="oxygen",
+            base_impact=float((event.resource_impact or {}).get("oxygen", -25.0)),
+        )
+
+    def _handle_agent_ration_spoilage(self, colony_state: ColonyState, event: Event) -> Dict[str, Any]:
+        """Targeted calories damage to one agent."""
+        return self._apply_targeted_agent_impact(
+            colony_state,
+            event,
+            resource="calories",
+            base_impact=float((event.resource_impact or {}).get("calories", -22.0)),
+        )
     
     def _check_cascading_effects(self, colony_state: ColonyState, event: Event) -> List[Dict[str, Any]]:
         """

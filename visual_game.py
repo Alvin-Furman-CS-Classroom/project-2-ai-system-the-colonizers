@@ -10,7 +10,7 @@ import sys
 import math
 import random
 import os
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Set
 from src.game_engine import GameEngine
 from src.module1_state.colony_state import ColonyState
 from src.module2_search.task_planner import Task, TaskPlanner
@@ -169,6 +169,8 @@ STATE_GAME_OVER = "game_over"
 
 # Typing this digit sequence during play tops up colony wood (developer / QA testing).
 DEV_WOOD_CHEAT_CODE = "941481"
+# Spawns several speed-boost map pickups (developer / QA testing).
+DEV_SPEED_CHEAT_CODE = "2326"
 
 
 class ResourceStation:
@@ -446,8 +448,9 @@ class VisualGame:
         # Latest Module 6 survival assessment (updated each turn for testing / debug UI)
         self.last_survival_assessment: Optional[Dict[str, Any]] = None
 
-        # Rolling buffer for DEV_WOOD_CHEAT_CODE (digits only)
+        # Rolling buffers for dev digit cheats (digits only)
         self._dev_wood_cheat_buffer: str = ""
+        self._dev_speed_cheat_buffer: str = ""
 
         # --- Sprites / textures (loaded from assets/) ---
         # Terrain tiles (filenames can be adjusted if yours differ)
@@ -635,6 +638,71 @@ class VisualGame:
             occupied.add((p.x, p.y))
         return occupied
 
+    def _snapshot_agent_powerup_carryover(
+        self, state: ColonyState, new_agent_count: int
+    ) -> Dict[int, Tuple[float, Set[str]]]:
+        """Per-agent speed and auto-walk powerup types for IDs that are rebuilt on the next floor."""
+        out: Dict[int, Tuple[float, Set[str]]] = {}
+        for a in state.agents:
+            if a.get("status") == "dead":
+                continue
+            aid = a.get("id")
+            if not isinstance(aid, int) or aid < 0 or aid >= new_agent_count:
+                continue
+            spd = float(a.get("speed") or 1.0)
+            perks = set(self.agent_powerups.get(aid, set()))
+            out[aid] = (spd, perks)
+        return out
+
+    def _apply_agent_powerup_carryover(
+        self, state: ColonyState, carry: Dict[int, Tuple[float, Set[str]]]
+    ) -> None:
+        """Reapply persisted speed and collector powerups after floor-regenerated agents exist."""
+        for aid, (spd, perks) in carry.items():
+            agent = state.get_agent_by_id(aid)
+            if not agent or agent.get("status") == "dead":
+                continue
+            if spd > 1.0:
+                agent["speed"] = min(2.25, spd)
+            if perks:
+                self.agent_powerups[aid] = set(perks)
+
+    def _powerups_valid_on_floor(self, state: ColonyState, previous: List[Powerup]) -> List[Powerup]:
+        """
+        Keep map powerups whose tile is still valid after regen; drop collisions with trees/stations/agents.
+        At most one pickup per tile.
+        """
+        station_tiles: Set[Tuple[int, int]] = set()
+        for st in self.resource_stations:
+            station_tiles.update(st.get_tiles())
+        tree_cells: Set[Tuple[int, int]] = set()
+        for t in state.world_trees or []:
+            if len(t) >= 2:
+                tree_cells.add((int(t[0]), int(t[1])))
+        agent_cells: Set[Tuple[int, int]] = set()
+        for a in state.agents:
+            if a.get("status") == "dead":
+                continue
+            loc = a.get("location")
+            if loc and len(loc) == 2:
+                agent_cells.add((int(loc[0]), int(loc[1])))
+        used_tile: Set[Tuple[int, int]] = set()
+        out: List[Powerup] = []
+        for p in previous:
+            x, y = int(p.x), int(p.y)
+            if not (WORLD_MIN_X <= x < WORLD_MAX_X and WORLD_MIN_Y <= y < WORLD_MAX_Y):
+                continue
+            tile = state.get_tile_at(x, y)
+            if not tile.get("passable", True) or tile.get("terrain") == "water":
+                continue
+            if (x, y) in station_tiles or (x, y) in tree_cells or (x, y) in agent_cells:
+                continue
+            if (x, y) in used_tile:
+                continue
+            used_tile.add((x, y))
+            out.append(Powerup(x, y, p.powerup_type))
+        return out
+
     def _sample_powerup_tile(
         self, state: ColonyState, rng: random.Random, occupied: set
     ) -> Optional[Tuple[int, int]]:
@@ -697,6 +765,27 @@ class VisualGame:
             state.resources["wood"] = cur + 100.0
         self._show_event("Dev: colony wood topped up")
 
+    def _apply_dev_speed_powerups_cheat(self) -> None:
+        """Place N speed-boost powerups on passable tiles (same pickup type as map spawns)."""
+        if not self.game:
+            return
+        state = self.game.state
+        rng = random.Random(
+            int(state.world_seed) + int(state.turn_number) * 997 + 23260
+        )
+        n_spawn = 5
+        added = 0
+        for _ in range(n_spawn * 32):
+            if added >= n_spawn:
+                break
+            occupied = self._powerup_occupied_cells(state)
+            xy = self._sample_powerup_tile(state, rng, occupied)
+            if not xy:
+                break
+            self.powerups.append(Powerup(xy[0], xy[1], POWERUP_SPEED_BOOST))
+            added += 1
+        self._show_event(f"Dev: placed {added} speed powerup(s) on the map")
+
     def _ensure_viewport_trees_turn(self) -> None:
         """Once per turn: guarantee K trees in the current camera view (see VIEWPORT_TREES_K)."""
         if not self.game:
@@ -750,6 +839,7 @@ class VisualGame:
     def _create_initial_game(self) -> GameEngine:
         """Create initial game state with agents and resource stations."""
         self._dev_wood_cheat_buffer = ""
+        self._dev_speed_cheat_buffer = ""
         # Clear tile cache to ensure fresh map generation
         clear_tile_cache()
         self.event_tasks.clear()
@@ -897,6 +987,8 @@ class VisualGame:
             self.game.invalidate_terrain_cache()
         names = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
         count = min(max(1, self.starting_agents), 5)
+        persist_map_powerups = list(self.powerups)
+        carry_agent_powerups = self._snapshot_agent_powerup_carryover(state, count)
         state.agents.clear()
         start_positions = [(0, 0), (5, 5), (-5, 5), (-5, -5), (5, -5)]
         for i in range(count):
@@ -922,10 +1014,8 @@ class VisualGame:
         for sid in list(state.infrastructure.keys()):
             del state.infrastructure[sid]
         self._sync_stations_to_state(state)
-        self.powerups = []
         self.agent_powerups = {}
         self.agent_auto_target = {}
-        self._spawn_initial_powerups(state)
         self.agent_paths.clear()
         self.agent_visual_pos.clear()
         state.world_trees = generate_world_trees(
@@ -936,6 +1026,9 @@ class VisualGame:
             WORLD_MAX_Y,
             tree_density_multiplier=float(knobs["tree_density_multiplier"]),
         )
+        self.powerups = self._powerups_valid_on_floor(state, persist_map_powerups)
+        self._spawn_initial_powerups(state)
+        self._apply_agent_powerup_carryover(state, carry_agent_powerups)
         self._apply_ai_settings_to_engine()
         self.game.task_planner = TaskPlanner(state)
         self.last_survival_assessment = self.game.survival_assessor.assess_survival(state)
@@ -2074,11 +2167,16 @@ class VisualGame:
                     elif pygame.K_KP0 <= event.key <= pygame.K_KP9:
                         ch = str(event.key - pygame.K_KP0)
                     if len(ch) == 1 and ch.isdigit():
-                        n = len(DEV_WOOD_CHEAT_CODE)
-                        self._dev_wood_cheat_buffer = (self._dev_wood_cheat_buffer + ch)[-n:]
+                        nw = len(DEV_WOOD_CHEAT_CODE)
+                        self._dev_wood_cheat_buffer = (self._dev_wood_cheat_buffer + ch)[-nw:]
                         if self._dev_wood_cheat_buffer == DEV_WOOD_CHEAT_CODE:
                             self._apply_dev_wood_cheat()
                             self._dev_wood_cheat_buffer = ""
+                        ns = len(DEV_SPEED_CHEAT_CODE)
+                        self._dev_speed_cheat_buffer = (self._dev_speed_cheat_buffer + ch)[-ns:]
+                        if self._dev_speed_cheat_buffer == DEV_SPEED_CHEAT_CODE:
+                            self._apply_dev_speed_powerups_cheat()
+                            self._dev_speed_cheat_buffer = ""
             
             if event.type == pygame.MOUSEBUTTONDOWN:
                 mouse_x, mouse_y = pygame.mouse.get_pos()

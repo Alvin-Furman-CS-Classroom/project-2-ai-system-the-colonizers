@@ -7,6 +7,10 @@ Provides survival probability and risk assessment using either:
 
 Q-learning is trained offline on a simple pressure MDP; at runtime assess_survival
 reads max_a Q(s,a) for the discretized state (with heuristic fallback if unseen).
+
+Training uses abstract “pressure” steps on colony clones, not the full four-phase
+game loop; the Q-table still summarizes resource and population pressure relevant
+to live turns via discretize_colony_state.
 """
 
 from __future__ import annotations
@@ -172,6 +176,9 @@ class SurvivalAssessor:
     ) -> None:
         """
         Offline training for the Q-table (standard Q-learning backups).
+
+        Updates use the surrogate MDP in q_learning.apply_pressure_step, not a
+        full simulation of Module 2–5.
 
         If use_rl is False, still trains the table so you can switch use_rl on later.
         """

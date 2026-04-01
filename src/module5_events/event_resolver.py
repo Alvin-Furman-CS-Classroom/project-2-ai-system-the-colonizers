@@ -6,17 +6,38 @@ updating resources, and handling cascading effects.
 
 Input: Selected event from Module 4, current colony state
 Output: Modified colony state after event application
+
+Live catalog vs. legacy handlers:
+    The default ``GameEngine`` event catalog uses agent-targeted hazards
+    (see ``GameEngine._create_default_events``) and station breakdown
+    events chosen by the Director. Handlers for ``hull_breach``,
+    ``resource_shortage``, and ``equipment_failure`` remain supported for
+    tests and custom Director catalogs; they are not in the default catalog.
 """
 
-from typing import Dict, Any, List
+from typing import Any, Callable, Dict, List
 from src.module1_state.colony_state import ColonyState
 from src.module4_game_theory.ai_director import Event
 
-BASE_REPAIR_TURNS = 5
+BASE_REPAIR_TURNS = 4
+
+# Softens agent-targeted hazards (trip / puncture / spoilage) for playability.
+AGENT_HAZARD_DAMAGE_SCALE = 0.76
 WARNING_TO_FAILURE_TURNS = 1
 PER_AGENT_DEPLETION_PERCENT_MULTIPLIER = 1.2
 PER_AGENT_DEPLETION_PERCENT_MIN = 0.10
 PER_AGENT_DEPLETION_PERCENT_MAX = 0.60
+
+HULL_BREACH_INFRA_DAMAGE_SCALE = 50.0
+HULL_BREACH_AGENT_INTEGRITY_SCALE = 20.0
+HULL_BREACH_CASCADE_DAMAGE_SCALE = 10.0
+HULL_BREACH_CASCADE_SEVERITY_THRESHOLD = 0.7
+EQUIPMENT_EFFICIENCY_REDUCTION_MAX = 0.3
+
+def _effective_repair_turns(colony_state: ColonyState) -> int:
+    return BASE_REPAIR_TURNS + int(getattr(colony_state, "floor_repair_turns_extra", 0))
+
+
 AGENT_HAZARD_TYPES = {
     "agent_trip_over_rock",
     "agent_oxygen_tank_puncture",
@@ -39,7 +60,7 @@ class EventResolver:
         """Initialize event resolver with event handlers."""
         self.event_handlers = self._initialize_handlers()
     
-    def _initialize_handlers(self) -> Dict[str, callable]:
+    def _initialize_handlers(self) -> Dict[str, Callable[..., Any]]:
         """
         Initialize handlers for different event types.
         
@@ -50,6 +71,7 @@ class EventResolver:
             "hull_breach": self._handle_hull_breach,
             "resource_shortage": self._handle_resource_shortage,
             "equipment_failure": self._handle_equipment_failure,
+            "no_adversarial_event": self._handle_no_adversarial_event,
             "station_breakdown": self._handle_station_breakdown,
             "agent_trip_over_rock": self._handle_agent_trip_over_rock,
             "agent_oxygen_tank_puncture": self._handle_agent_oxygen_tank_puncture,
@@ -146,7 +168,7 @@ class EventResolver:
         if event.location not in colony_state.infrastructure:
             colony_state.infrastructure[event.location] = {"integrity": 100.0}
         
-        damage = event.severity * 50.0  # Scale damage by severity
+        damage = event.severity * HULL_BREACH_INFRA_DAMAGE_SCALE
         colony_state.infrastructure[event.location]["integrity"] -= damage
         effects["infrastructure_damaged"].append({
             "location": event.location,
@@ -157,7 +179,9 @@ class EventResolver:
         for i, agent in enumerate(colony_state.agents):
             if agent.get("location") == event.location:
                 # Agents exposed to vacuum take damage
-                agent["integrity"] = agent.get("integrity", 100.0) - (event.severity * 20.0)
+                agent["integrity"] = agent.get("integrity", 100.0) - (
+                    event.severity * HULL_BREACH_AGENT_INTEGRITY_SCALE
+                )
                 effects["agents_affected"].append(i)
         
         return effects
@@ -197,7 +221,7 @@ class EventResolver:
         """
         effects = {
             "equipment_failed": event.location,
-            "efficiency_reduction": event.severity * 0.3  # 30% max reduction
+            "efficiency_reduction": event.severity * EQUIPMENT_EFFICIENCY_REDUCTION_MAX,
         }
         
         # Mark equipment as failed in infrastructure
@@ -209,6 +233,10 @@ class EventResolver:
         
         return effects
     
+    def _handle_no_adversarial_event(self, colony_state: ColonyState, event: Event) -> Dict[str, Any]:
+        """Director suppressed when colony wood >= per-floor quota; no disaster effect."""
+        return {"suppressed": True, "reason": "wood_quota_met"}
+
     def _handle_generic(self, colony_state: ColonyState, event: Event) -> Dict[str, Any]:
         """
         Generic handler for unknown event types.
@@ -253,11 +281,12 @@ class EventResolver:
         # Stage 2: full breakdown (either already warning or directly escalated).
         station["status"] = "failed"
         station["warning_turns_remaining"] = 0
+        eff = _effective_repair_turns(colony_state)
         if int(station.get("repair_remaining_turns", 0)) <= 0:
-            station["repair_remaining_turns"] = BASE_REPAIR_TURNS
+            station["repair_remaining_turns"] = eff
         station["repair_total_turns"] = max(
-            int(station.get("repair_total_turns", BASE_REPAIR_TURNS)),
-            int(station.get("repair_remaining_turns", BASE_REPAIR_TURNS)),
+            int(station.get("repair_total_turns", eff)),
+            int(station.get("repair_remaining_turns", eff)),
         )
         station["repair_agent_id"] = None
 
@@ -284,7 +313,10 @@ class EventResolver:
         target_id = self._resolve_target_agent_id(colony_state, event, resource)
         if target_id is None:
             return {"error": "No living agent available"}
-        magnitude = abs(float(base_impact)) * (0.8 + (0.6 * float(event.severity)))
+        severity_term = 0.75 + (0.48 * float(event.severity))
+        magnitude = (
+            abs(float(base_impact)) * severity_term * AGENT_HAZARD_DAMAGE_SCALE
+        )
         applied = -magnitude
         ok = colony_state.consume_agent_resources(target_id, {resource: applied})
         if not ok:
@@ -302,7 +334,7 @@ class EventResolver:
             colony_state,
             event,
             resource="integrity",
-            base_impact=float((event.resource_impact or {}).get("integrity", -20.0)),
+            base_impact=float((event.resource_impact or {}).get("integrity", -17.0)),
         )
 
     def _handle_agent_oxygen_tank_puncture(self, colony_state: ColonyState, event: Event) -> Dict[str, Any]:
@@ -320,7 +352,7 @@ class EventResolver:
             colony_state,
             event,
             resource="calories",
-            base_impact=float((event.resource_impact or {}).get("calories", -22.0)),
+            base_impact=float((event.resource_impact or {}).get("calories", -18.0)),
         )
     
     def _check_cascading_effects(self, colony_state: ColonyState, event: Event) -> List[Dict[str, Any]]:
@@ -342,13 +374,14 @@ class EventResolver:
         cascading = []
         
         # Example: Hull breach affects adjacent sections
-        if event.event_type == "hull_breach" and event.severity > 0.7:
-            # High severity breaches may spread
+        if (
+            event.event_type == "hull_breach"
+            and event.severity > HULL_BREACH_CASCADE_SEVERITY_THRESHOLD
+        ):
             adjacent_locations = self._get_adjacent_locations(event.location)
             for adj_location in adjacent_locations:
                 if adj_location in colony_state.infrastructure:
-                    # Apply minor damage to adjacent areas
-                    minor_damage = event.severity * 10.0
+                    minor_damage = event.severity * HULL_BREACH_CASCADE_DAMAGE_SCALE
                     if "integrity" not in colony_state.infrastructure[adj_location]:
                         colony_state.infrastructure[adj_location]["integrity"] = 100.0
                     colony_state.infrastructure[adj_location]["integrity"] -= minor_damage
@@ -363,15 +396,14 @@ class EventResolver:
     
     def _get_adjacent_locations(self, location: str) -> List[str]:
         """
-        Get list of adjacent locations to a given location.
-        
+        Named infrastructure sections in this project do not carry a graph of
+        neighbors. High-severity hull breach therefore has no adjacent sections
+        to spread to unless a future layout model supplies adjacency here.
+
         Args:
-            location: Location identifier
-            
+            location: Current section identifier (unused until a graph exists)
+
         Returns:
-            List of adjacent location identifiers
+            Adjacent location ids; currently always empty.
         """
-        # TODO: Implement location adjacency logic
-        # This depends on your colony layout structure
-        # For now, return empty list
         return []

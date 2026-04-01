@@ -15,6 +15,16 @@ from src.game_engine import GameEngine
 from src.module1_state.colony_state import ColonyState
 from src.module2_search.task_planner import Task
 from src.module1_state.procedural_tiles import clear_tile_cache
+from src.module1_state.tree_generation import (
+    base_wood_quota,
+    generate_world_trees,
+    try_harvest_trees,
+)
+from src.module1_state.floor_carryover import (
+    compute_stress_bin,
+    next_floor_knobs,
+    summarize_finished_floor,
+)
 
 # Asset loading
 # visual_game.py lives at the project root, alongside the top-level assets/ folder.
@@ -64,6 +74,8 @@ COLOR_SAND = (238, 203, 173)
 COLOR_DIRT = (101, 67, 33)
 COLOR_AGENT = (255, 215, 0)  # Gold
 COLOR_AGENT_LOW_HEALTH = (255, 0, 0)  # Red
+COLOR_TREE_TRUNK = (101, 67, 33)
+COLOR_TREE_FOLIAGE = (25, 120, 45)
 COLOR_INFRASTRUCTURE = (70, 130, 180)  # Steel blue
 COLOR_BACKGROUND = (20, 20, 30)
 COLOR_SIDEBAR_BG = (40, 40, 50)
@@ -641,9 +653,116 @@ class VisualGame:
         self.agent_visual_pos.clear()
         engine = GameEngine(initial_state)
         self.game = engine
+
+        # Multi-floor: world AABB, wood quota, sparse trees (design: harder difficulty → fewer trees).
+        st = engine.state
+        st.world_min_x, st.world_max_x = WORLD_MIN_X, WORLD_MAX_X
+        st.world_min_y, st.world_max_y = WORLD_MIN_Y, WORLD_MAX_Y
+        st.floor_index = max(1, int(getattr(st, "floor_index", 1)))
+        st.wood_quota = float(base_wood_quota(self.difficulty, st.floor_index))
+        st.floor_start_turn = int(st.turn_number)
+        st.floor_disasters_count = 0
+        st.floor_deaths_count = 0
+        st.turn_wood_quota_met = None
+        st.floor_repair_turns_extra = 0
+        st.director_aggression_bonus = 0.0
+        st.rl_carryover_stress_bin = 0
+        if "wood" not in st.resources:
+            st.resources["wood"] = 0.0
+        st.world_trees = generate_world_trees(
+            st,
+            WORLD_MIN_X,
+            WORLD_MAX_X,
+            WORLD_MIN_Y,
+            WORLD_MAX_Y,
+            tree_density_multiplier=1.0,
+        )
+
         self._apply_ai_settings_to_engine()
         self.last_survival_assessment = engine.survival_assessor.assess_survival(engine.state)
         return engine
+
+    def _advance_to_next_floor(self) -> None:
+        """End current floor, record summary for RL/carryover, regenerate map content."""
+        if not self.game:
+            return
+        state = self.game.state
+        summary = summarize_finished_floor(
+            state,
+            int(getattr(state, "floor_start_turn", 0)),
+            int(getattr(state, "floor_disasters_count", 0)),
+            int(getattr(state, "floor_deaths_count", 0)),
+            getattr(state, "turn_wood_quota_met", None),
+        )
+        state.prior_floor_summaries.append(summary)
+        stress = compute_stress_bin(summary)
+        knobs = next_floor_knobs(
+            state.prior_floor_summaries,
+            int(state.floor_index) + 1,
+            state.difficulty,
+        )
+        state.rl_carryover_stress_bin = stress
+        state.floor_index = int(state.floor_index) + 1
+        state.world_seed = (int(state.world_seed) + 104729 * state.floor_index) % (2**31)
+        state.resources["wood"] = 0.0
+        state.wood_quota = float(
+            base_wood_quota(state.difficulty, state.floor_index) + knobs["wood_quota_adjust"]
+        )
+        state.turn_wood_quota_met = None
+        state.floor_start_turn = int(state.turn_number)
+        state.floor_disasters_count = 0
+        state.floor_deaths_count = 0
+        state.floor_repair_turns_extra = int(knobs["extra_repair_turns"])
+        state.director_aggression_bonus = float(
+            getattr(state, "director_aggression_bonus", 0.0) + knobs["director_aggression_delta"]
+        )
+
+        clear_tile_cache()
+        names = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
+        count = min(max(1, self.starting_agents), 5)
+        state.agents.clear()
+        start_positions = [(0, 0), (5, 5), (-5, 5), (-5, -5), (5, -5)]
+        for i in range(count):
+            x, y = start_positions[i % len(start_positions)]
+            x = max(WORLD_MIN_X, min(WORLD_MAX_X - 1, x + (i * 2 % 5 - 2)))
+            y = max(WORLD_MIN_Y, min(WORLD_MAX_Y - 1, y + (i * 3 % 5 - 2)))
+            state.add_agent(
+                {
+                    "id": i,
+                    "name": names[i % len(names)],
+                    "oxygen": 80.0,
+                    "calories": 70.0,
+                    "integrity": 90.0,
+                    "location": (x, y),
+                    "status": "active",
+                },
+                validate=True,
+            )
+
+        self.resource_stations = self._choose_station_placements(state, int(state.floor_index))
+        for sid in list(state.infrastructure.keys()):
+            del state.infrastructure[sid]
+        self._sync_stations_to_state(state)
+        self.powerups = []
+        self.agent_powerups = {}
+        self.agent_auto_target = {}
+        self._spawn_initial_powerups(state)
+        self.agent_paths.clear()
+        self.agent_visual_pos.clear()
+        state.world_trees = generate_world_trees(
+            state,
+            WORLD_MIN_X,
+            WORLD_MAX_X,
+            WORLD_MIN_Y,
+            WORLD_MAX_Y,
+            tree_density_multiplier=float(knobs["tree_density_multiplier"]),
+        )
+        self._apply_ai_settings_to_engine()
+        self.game.task_planner = TaskPlanner(state)
+        self.last_survival_assessment = self.game.survival_assessor.assess_survival(state)
+        self._show_event(
+            f"Floor {int(state.floor_index)} — wood quota {state.wood_quota:.0f}. Disasters active again."
+        )
 
     def _difficulty_defaults(self, difficulty: str) -> Dict[str, float]:
         """Return default gameplay + AI settings for a difficulty preset."""
@@ -676,8 +795,9 @@ class VisualGame:
         """Push current AI tuning values into the running GameEngine (if any)."""
         if not self.game:
             return
+        bonus = float(getattr(self.game.state, "director_aggression_bonus", 0.0))
         self.game.set_ai_director_settings(
-            aggression=self.ai_aggression,
+            aggression=self.ai_aggression + bonus,
             randomness=self.ai_randomness,
             repetition_window=self.ai_repeat_cooldown,
         )
@@ -1084,10 +1204,39 @@ class VisualGame:
                     hint = self.font_sidebar_body.render(f"If trends hold: crisis in ~{ttf} turns", True, (180, 165, 140))
                     self.screen.blit(hint, (sidebar_x + 10, y_offset))
                     y_offset += 13
-            else:
-                pending = self.font_sidebar_body.render("Outlook: —", True, (120, 120, 130))
-                self.screen.blit(pending, (sidebar_x + 10, y_offset))
+                else:
+                    pending = self.font_sidebar_body.render("Outlook: —", True, (120, 120, 130))
+                    self.screen.blit(pending, (sidebar_x + 10, y_offset))
+                    y_offset += 14
+            y_offset += 6
+            floor_line = self.font_sidebar_body.render(
+                f"Floor {int(getattr(state, 'floor_index', 1))}", True, (180, 200, 220)
+            )
+            self.screen.blit(floor_line, (sidebar_x + 10, y_offset))
+            y_offset += 14
+            wq = float(getattr(state, "wood_quota", 0.0) or 0.0)
+            wood_amt = float(state.resources.get("wood", 0.0))
+            wood_line = self.font_sidebar_body.render(
+                f"Wood: {wood_amt:.0f} / {wq:.0f}", True, (210, 175, 120)
+            )
+            self.screen.blit(wood_line, (sidebar_x + 10, y_offset))
+            y_offset += 14
+            self.advance_floor_button_rect = None
+            if wq > 0 and wood_amt >= wq:
+                calm = self.font_sidebar_body.render(
+                    "Disasters halted — safe to advance.", True, (120, 220, 140)
+                )
+                self.screen.blit(calm, (sidebar_x + 10, y_offset))
                 y_offset += 14
+                adv_rect = pygame.Rect(sidebar_x + 10, y_offset, self.sidebar_width - 20, 28)
+                self.advance_floor_button_rect = adv_rect
+                pygame.draw.rect(self.screen, (70, 110, 90), adv_rect)
+                pygame.draw.rect(self.screen, COLOR_TEXT, adv_rect, 2)
+                adv_lbl = self.font_sidebar_body.render("Advance to next floor", True, COLOR_TEXT)
+                self.screen.blit(adv_lbl, adv_lbl.get_rect(center=adv_rect.center))
+                y_offset += 32
+            else:
+                y_offset += 4
             y_offset += 8
             RECRUIT_COST = (30, 30, 30)
             can_recruit = (
@@ -1107,6 +1256,7 @@ class VisualGame:
 
         elif self.sidebar_tab == "agents":
             self.recruit_button_rect = None
+            self.advance_floor_button_rect = None
             # Reserve a gutter on the right for scrollbar so content never overlaps
             agents_gutter = 44
             agents_content_right = sidebar_x + self.sidebar_width - agents_gutter
@@ -1230,6 +1380,7 @@ class VisualGame:
         else:
             # Tasks tab
             self.recruit_button_rect = None
+            self.advance_floor_button_rect = None
             self.agent_scroll_up_rect = None
             self.agent_scroll_down_rect = None
             self.event_task_rects = []
@@ -1578,6 +1729,30 @@ class VisualGame:
         # Draw world boundary indicators
         self._draw_world_bounds()
 
+    def _draw_trees(self):
+        """Draw harvestable trees from ColonyState.world_trees (on top of terrain)."""
+        if not self.game:
+            return
+        state = self.game.get_state()
+        ts = self._get_scaled_tile_size()
+        for t in state.world_trees or []:
+            if len(t) < 2:
+                continue
+            wx, wy = int(t[0]), int(t[1])
+            if not (WORLD_MIN_X <= wx < WORLD_MAX_X and WORLD_MIN_Y <= wy < WORLD_MAX_Y):
+                continue
+            sx, sy = self._world_to_screen(wx, wy)
+            trunk_r = max(2, int(ts * 0.12))
+            fol_r = max(4, int(ts * 0.28))
+            pygame.draw.circle(
+                self.screen, COLOR_TREE_FOLIAGE, (int(sx), int(sy - fol_r // 2)), fol_r
+            )
+            pygame.draw.rect(
+                self.screen,
+                COLOR_TREE_TRUNK,
+                (int(sx) - trunk_r // 2, int(sy), trunk_r, int(ts * 0.22)),
+            )
+
     def _toggle_fullscreen(self) -> None:
         """Toggle fullscreen mode and refresh dynamic layout dimensions."""
         self.fullscreen = not self.fullscreen
@@ -1701,6 +1876,8 @@ class VisualGame:
                                     break
                         if self.sidebar_tab == "colony" and hasattr(self, 'recruit_button_rect') and self.recruit_button_rect and self.recruit_button_rect.collidepoint(mouse_pos):
                             self._recruit_agent()
+                        if self.sidebar_tab == "colony" and getattr(self, "advance_floor_button_rect", None) and self.advance_floor_button_rect.collidepoint(mouse_pos):
+                            self._advance_to_next_floor()
                 
                 # Check if click is in game area
                 if mouse_x < self.camera_width:
@@ -2044,7 +2221,10 @@ class VisualGame:
                 if dist_to_next < 0.1:
                     reached = path.pop(0)
                     vx, vy = float(reached[0]), float(reached[1])
-                    state.update_agent(agent_index, {"location": (int(round(vx)), int(round(vy)))}, validate=False)
+                    state.update_agent(
+                        agent_index, {"location": (int(round(vx)), int(round(vy)))}, validate=False
+                    )
+                    try_harvest_trees(state, [(int(round(vx)), int(round(vy)))])
                     if not path:
                         to_remove.append(agent_id)
                         self.agent_visual_pos.pop(agent_id, None)
@@ -2076,7 +2256,10 @@ class VisualGame:
             if dist <= 0.05:  # Very close, snap to target
                 path.pop(0)
                 vx, vy = tx, ty
-                state.update_agent(agent_index, {"location": (int(round(tx)), int(round(ty)))}, validate=False)
+                state.update_agent(
+                    agent_index, {"location": (int(round(tx)), int(round(ty)))}, validate=False
+                )
+                try_harvest_trees(state, [(int(round(tx)), int(round(ty)))])
                 self.agent_visual_pos[agent_id] = (vx, vy)
                 if not path:
                     to_remove.append(agent_id)
@@ -2097,7 +2280,10 @@ class VisualGame:
                 if new_dist < 0.1 or step >= dist - 0.05:
                     path.pop(0)
                     vx, vy = tx, ty
-                    state.update_agent(agent_index, {"location": (int(round(tx)), int(round(ty)))}, validate=False)
+                    state.update_agent(
+                        agent_index, {"location": (int(round(tx)), int(round(ty)))}, validate=False
+                    )
+                    try_harvest_trees(state, [(int(round(tx)), int(round(ty)))])
                     self.agent_visual_pos[agent_id] = (vx, vy)
                     if not path:
                         to_remove.append(agent_id)
@@ -2141,6 +2327,7 @@ class VisualGame:
             integrity = agent.get("integrity", 100.0)
             if oxygen <= 0 or calories <= 0 or integrity <= 0:
                 state.update_agent(i, {"status": "dead"}, validate=False)
+                state.floor_deaths_count = int(getattr(state, "floor_deaths_count", 0)) + 1
                 agent_id = agent.get("id")
                 if agent_id in self.agent_paths:
                     self.agent_paths.pop(agent_id)
@@ -2232,7 +2419,7 @@ class VisualGame:
             # fall back to generic event location for other events.
             event_location = event_info.get("target_station_id") or event_info.get("location", "")
             target_agent_id = event_info.get("target_agent_id")
-            if event_type:
+            if event_type and event_type != "no_adversarial_event":
                 event_desc = f"{event_type.upper()} at {event_location}"
                 if event_type == "station_breakdown":
                     status = specific_effects.get("status")
@@ -3213,6 +3400,7 @@ class VisualGame:
                 # Draw paused gameplay in background + overlay
                 if self.game:
                     self._draw_map()
+                    self._draw_trees()
                     self._draw_graph_location_labels()
                     self._draw_resource_stations()
                     self._draw_powerups()
@@ -3248,6 +3436,7 @@ class VisualGame:
                         self.hovered_agent_id = None
                     # Draw everything
                     self._draw_map()
+                    self._draw_trees()
                     self._draw_graph_location_labels()
                     self._draw_resource_stations()
                     self._draw_powerups()

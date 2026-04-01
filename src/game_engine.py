@@ -14,14 +14,24 @@ from typing import Dict, Any, List, Tuple, Optional
 import heapq
 import math
 from src.module1_state.colony_state import ColonyState
+from src.module1_state.tree_generation import maybe_spawn_progression_tree
 from src.module2_search.task_planner import TaskPlanner, Task
 from src.module3_logic.rule_engine import RuleEngine
 from src.module4_game_theory.ai_director import AIDirector, Event
 from src.module5_events.event_resolver import EventResolver
 from src.module6_rl.survival_assessor import SurvivalAssessor
 
-BASE_REPAIR_TURNS = 5
+BASE_REPAIR_TURNS = 4
 MAX_EFFECTIVE_REPAIR_AGENTS = 3
+
+# When colony wood >= wood_quota, adversarial phase selects this event instead of the Director.
+NO_ADVERSARY_EVENT = Event(
+    "no_adversarial_event",
+    "n/a",
+    0.0,
+    {},
+    "Wood quota met; no new disasters this turn.",
+)
 
 
 class GameEngine:
@@ -66,7 +76,16 @@ class GameEngine:
         # Initialize AI Director with available events
         self.available_events = self._create_default_events()
         self.ai_director = AIDirector(self.available_events)
-    
+
+    def _effective_base_repair_turns(self) -> int:
+        return BASE_REPAIR_TURNS + int(getattr(self.state, "floor_repair_turns_extra", 0))
+
+    def _adversary_suppressed_by_wood_quota(self) -> bool:
+        q = float(getattr(self.state, "wood_quota", 0.0) or 0.0)
+        if q <= 0.0:
+            return False
+        return float(self.state.resources.get("wood", 0.0)) >= q
+
     def _create_default_events(self) -> list[Event]:
         """Create default catalog of available events."""
         return [
@@ -74,21 +93,21 @@ class GameEngine:
                 event_type="agent_trip_over_rock",
                 location="agent",
                 severity=0.5,
-                resource_impact={"integrity": -22.0},
+                resource_impact={"integrity": -17.0},
                 description="Agent trips over rough terrain and damages equipment",
             ),
             Event(
                 event_type="agent_oxygen_tank_puncture",
                 location="agent",
                 severity=0.45,
-                resource_impact={"oxygen": -26.0},
+                resource_impact={"oxygen": -20.0},
                 description="An agent's oxygen tank is punctured",
             ),
             Event(
                 event_type="agent_ration_spoilage",
                 location="agent",
                 severity=0.4,
-                resource_impact={"calories": -24.0},
+                resource_impact={"calories": -18.0},
                 description="An agent's ration pack spoils unexpectedly",
             ),
         ]
@@ -177,11 +196,24 @@ class GameEngine:
         """
         Run the **Adversarial phase** (Module 4: `AIDirector`) on the current state.
 
+        If ``wood >= wood_quota`` on the current floor, the Director is skipped and a
+        no-op event is returned (no new disasters until the next floor).
+
         Returns:
             Tuple of:
                 - The selected `Event` instance.
                 - A small dictionary summary (type, location, severity) for reporting/visuals.
         """
+        if self._adversary_suppressed_by_wood_quota():
+            summary = {
+                "event_selected": NO_ADVERSARY_EVENT.event_type,
+                "location": NO_ADVERSARY_EVENT.location,
+                "severity": NO_ADVERSARY_EVENT.severity,
+                "target_station_id": None,
+                "target_agent_id": None,
+                "suppressed_by_wood_quota": True,
+            }
+            return NO_ADVERSARY_EVENT, summary
         selected_event = self.ai_director.select_event_minimax(self.state)
         summary = {
             "event_selected": selected_event.event_type,
@@ -190,6 +222,7 @@ class GameEngine:
             # For station_breakdown, this is the concrete station target.
             "target_station_id": selected_event.target_station_id,
             "target_agent_id": selected_event.target_agent_id,
+            "suppressed_by_wood_quota": False,
         }
         return selected_event, summary
 
@@ -260,6 +293,8 @@ class GameEngine:
         # Phase 3: Adversarial - AI Event Selection (Module 4)
         selected_event, adversarial_summary = self.run_adversarial_phase()
         turn_report["phases"]["adversarial"] = adversarial_summary
+        if selected_event.event_type != NO_ADVERSARY_EVENT.event_type:
+            self.state.floor_disasters_count = int(getattr(self.state, "floor_disasters_count", 0)) + 1
 
         # Phase 4: Resolution - Resource Consumption & Event Application (Modules 1 & 5)
         resolution_result = self.run_resolution_phase(selected_event)
@@ -268,6 +303,16 @@ class GameEngine:
         # Survival Assessment (Module 6)
         survival_assessment = self.survival_assessor.assess_survival(self.state)
         turn_report["survival_assessment"] = survival_assessment
+
+        # First turn wood reached quota (before incrementing turn counter)
+        wq = float(getattr(self.state, "wood_quota", 0.0) or 0.0)
+        if wq > 0 and float(self.state.resources.get("wood", 0.0)) >= wq:
+            if getattr(self.state, "turn_wood_quota_met", None) is None:
+                self.state.turn_wood_quota_met = int(self.state.turn_number)
+
+        # Slow extra trees on grass/dirt if quota is otherwise unreachable this floor.
+        tree_spawned = maybe_spawn_progression_tree(self.state)
+        turn_report["phases"]["tree_regrowth"] = {"spawned": tree_spawned}
 
         # Advance to next turn
         self.state.next_turn()
@@ -354,12 +399,13 @@ class GameEngine:
             if not isinstance(info, dict):
                 continue
 
+            eff_base = self._effective_base_repair_turns()
             remaining = int(info.get("repair_remaining_turns", 0))
             if remaining <= 0:
-                remaining = BASE_REPAIR_TURNS
+                remaining = eff_base
                 info["repair_remaining_turns"] = remaining
             if int(info.get("repair_total_turns", 0)) <= 0:
-                info["repair_total_turns"] = max(remaining, BASE_REPAIR_TURNS)
+                info["repair_total_turns"] = max(remaining, eff_base)
 
             on_station = self._agents_on_station(station["center_x"], station["center_y"], station["size"])
             if not on_station:
@@ -408,10 +454,11 @@ class GameEngine:
             if remaining <= 0:
                 info["status"] = "failed"
                 info["warning_turns_remaining"] = 0
+                eff_base = self._effective_base_repair_turns()
                 if int(info.get("repair_remaining_turns", 0)) <= 0:
-                    info["repair_remaining_turns"] = BASE_REPAIR_TURNS
+                    info["repair_remaining_turns"] = eff_base
                 if int(info.get("repair_total_turns", 0)) <= 0:
-                    info["repair_total_turns"] = BASE_REPAIR_TURNS
+                    info["repair_total_turns"] = eff_base
                 info["repair_agent_id"] = None
                 escalated.append(station_id)
         return {"warning_ticking": ticking, "escalated_to_failed": escalated}
@@ -427,8 +474,11 @@ class GameEngine:
         Returns:
             True if tile is passable
         """
-        # Check world bounds (world is -25 to +25)
-        if not (-25 <= x < 25 and -25 <= y < 25):
+        mn_x = int(getattr(self.state, "world_min_x", -25))
+        mx_x = int(getattr(self.state, "world_max_x", 25))
+        mn_y = int(getattr(self.state, "world_min_y", -25))
+        mx_y = int(getattr(self.state, "world_max_y", 25))
+        if not (mn_x <= x < mx_x and mn_y <= y < mx_y):
             return False
         
         # Check terrain passability only (agents can overlap)

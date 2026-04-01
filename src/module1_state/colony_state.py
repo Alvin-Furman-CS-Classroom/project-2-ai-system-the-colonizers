@@ -78,6 +78,33 @@ class ColonyState:
         self.turn_number: int = state_data.get("turn_number", 0)
         self.world_seed: int = state_data.get("world_seed", 0)
         self.difficulty: str = state_data.get("difficulty", "normal")  # easy, normal, hard
+
+        # Multi-floor / wood progression (colony-level wood accumulated toward per-floor quota)
+        self.floor_index: int = int(state_data.get("floor_index", 1))
+        self.wood_quota: float = float(state_data.get("wood_quota", 8.0))
+        self.world_trees: List[List[int]] = state_data.get("world_trees", [])
+        self.prior_floor_summaries: List[Dict[str, Any]] = list(
+            state_data.get("prior_floor_summaries", [])
+        )
+        self.floor_start_turn: int = int(state_data.get("floor_start_turn", 0))
+        self.floor_disasters_count: int = int(state_data.get("floor_disasters_count", 0))
+        self.floor_deaths_count: int = int(state_data.get("floor_deaths_count", 0))
+        twqm = state_data.get("turn_wood_quota_met")
+        self.turn_wood_quota_met: Optional[int] = int(twqm) if twqm is not None else None
+        self.rl_carryover_stress_bin: int = int(state_data.get("rl_carryover_stress_bin", 0))
+        self.floor_repair_turns_extra: int = int(state_data.get("floor_repair_turns_extra", 0))
+        self.director_aggression_bonus: float = float(
+            state_data.get("director_aggression_bonus", 0.0)
+        )
+
+        # World AABB for pathfinding (defaults match legacy 50×50 centered at origin)
+        self.world_min_x: int = int(state_data.get("world_min_x", -25))
+        self.world_max_x: int = int(state_data.get("world_max_x", 25))
+        self.world_min_y: int = int(state_data.get("world_min_y", -25))
+        self.world_max_y: int = int(state_data.get("world_max_y", 25))
+
+        if "wood" not in self.resources:
+            self.resources["wood"] = float(state_data.get("resources", {}).get("wood", 0.0))
     
     def _create_empty_state(self) -> Dict[str, Any]:
         """Create an empty/default colony state."""
@@ -86,13 +113,29 @@ class ColonyState:
             "resources": {
                 "oxygen": 100.0,
                 "calories": 100.0,
-                "integrity": 100.0
+                "integrity": 100.0,
+                "wood": 0.0,
             },
             "infrastructure": {},
             "active_tasks": [],
             "turn_number": 0,
             "world_seed": 0,
-            "difficulty": "normal"
+            "difficulty": "normal",
+            "floor_index": 1,
+            "wood_quota": 8.0,
+            "world_trees": [],
+            "prior_floor_summaries": [],
+            "floor_start_turn": 0,
+            "floor_disasters_count": 0,
+            "floor_deaths_count": 0,
+            "turn_wood_quota_met": None,
+            "rl_carryover_stress_bin": 0,
+            "floor_repair_turns_extra": 0,
+            "director_aggression_bonus": 0.0,
+            "world_min_x": -25,
+            "world_max_x": 25,
+            "world_min_y": -25,
+            "world_max_y": 25,
         }
     
     def to_dict(self) -> Dict[str, Any]:
@@ -109,7 +152,22 @@ class ColonyState:
             "active_tasks": self.active_tasks,
             "turn_number": self.turn_number,
             "world_seed": self.world_seed,
-            "difficulty": self.difficulty
+            "difficulty": self.difficulty,
+            "floor_index": self.floor_index,
+            "wood_quota": self.wood_quota,
+            "world_trees": self.world_trees,
+            "prior_floor_summaries": self.prior_floor_summaries,
+            "floor_start_turn": self.floor_start_turn,
+            "floor_disasters_count": self.floor_disasters_count,
+            "floor_deaths_count": self.floor_deaths_count,
+            "turn_wood_quota_met": self.turn_wood_quota_met,
+            "rl_carryover_stress_bin": self.rl_carryover_stress_bin,
+            "floor_repair_turns_extra": self.floor_repair_turns_extra,
+            "director_aggression_bonus": self.director_aggression_bonus,
+            "world_min_x": self.world_min_x,
+            "world_max_x": self.world_max_x,
+            "world_min_y": self.world_min_y,
+            "world_max_y": self.world_max_y,
         }
     
     def to_json(self) -> str:
@@ -488,11 +546,13 @@ class ColonyState:
         """
         errors = []
         
-        # Validate resources
+        # Validate resources (colony wood is unbounded; core survival pools stay 0–100)
         for resource, value in self.resources.items():
             if not isinstance(value, (int, float)):
                 errors.append(f"Resource '{resource}' must be a number")
-            elif value < 0 or value > 100:
+            elif value < 0:
+                errors.append(f"Resource '{resource}' must be non-negative, got {value}")
+            elif resource != "wood" and value > 100:
                 errors.append(f"Resource '{resource}' must be between 0 and 100, got {value}")
         
         # Validate agents

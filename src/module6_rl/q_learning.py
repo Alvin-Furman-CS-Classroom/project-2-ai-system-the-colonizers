@@ -23,6 +23,9 @@ STANDARD_ACTIONS: Tuple[str, ...] = ("mild", "normal", "harsh")
 
 _DRAIN_BY_ACTION = {"mild": 2.0, "normal": 5.0, "harsh": 9.0}
 
+# Base discretization: 4^3 * 6 living-agent buckets = 384.
+_BASE_STATE_COUNT = 384
+
 
 def bucket_resource(level: float) -> int:
     """Four bins for each global resource (0 critical … 3 comfortable)."""
@@ -39,8 +42,9 @@ def discretize_colony_state(state: ColonyState) -> int:
     """
     Map colony state to an integer id for the Q-table.
 
-    Axes: oxygen, calories, integrity buckets (4 each), living-agent count capped at 5.
-    Total states: 4^3 * 6 = 384.
+    Axes: oxygen, calories, integrity buckets (4 each), living-agent count capped at 5,
+    floor depth bucket (4), prior-floor stress bin from multi-floor carryover (4).
+    Total states: 384 * 16 = 6144.
     """
     r = state.resources
     o = bucket_resource(float(r.get("oxygen", 0.0)))
@@ -51,12 +55,19 @@ def discretize_colony_state(state: ColonyState) -> int:
         if a.get("status") != "dead":
             alive += 1
     ac = min(alive, 5)
-    return o + 4 * (c + 4 * (i + 4 * ac))
+    base = o + 4 * (c + 4 * (i + 4 * ac))
+    fi = max(1, int(getattr(state, "floor_index", 1)))
+    floor_bucket = min(fi, 4) - 1  # 0..3 for floors 1–4+
+    stress = int(getattr(state, "rl_carryover_stress_bin", 0))
+    stress_bin = max(0, min(3, stress))
+    meta = floor_bucket + 4 * stress_bin
+    return base + _BASE_STATE_COUNT * meta
 
 
 def colony_is_terminal(state: ColonyState) -> bool:
-    """Episode ends if any tracked resource hits zero or any agent is dead."""
-    for _k, v in state.resources.items():
+    """Episode ends if any core resource hits zero or any agent is dead."""
+    for k in ("oxygen", "calories", "integrity"):
+        v = state.resources.get(k, 100.0)
         if float(v) <= 0.0:
             return True
     for a in state.agents:
@@ -88,6 +99,8 @@ def apply_pressure_step(state: ColonyState, action: str, rng: random.Random) -> 
     new_state = ColonyState(data)
     u = rng.uniform
     for key in new_state.resources:
+        if key == "wood":
+            continue
         new_state.resources[key] = max(
             0.0, float(new_state.resources[key]) - pressure * u(0.3, 1.0)
         )

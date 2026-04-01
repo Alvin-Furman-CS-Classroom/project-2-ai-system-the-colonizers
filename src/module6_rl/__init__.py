@@ -1,8 +1,21 @@
 """
 Module 6: Survival Assessment & Adaptation
 
-This module evaluates colony survival probability and provides
-risk assessment using Reinforcement Learning or heuristic evaluation.
-
-Topics: Reinforcement Learning (Q-Learning, Value Functions) or Heuristics
+Standard tabular Q-learning and heuristic survival assessment.
 """
+
+from src.module6_rl.survival_assessor import SurvivalAssessor
+from src.module6_rl.q_learning import (
+    TabularQAgent,
+    STANDARD_ACTIONS,
+    discretize_colony_state,
+    train_tabular_q,
+)
+
+__all__ = [
+    "SurvivalAssessor",
+    "TabularQAgent",
+    "STANDARD_ACTIONS",
+    "discretize_colony_state",
+    "train_tabular_q",
+]

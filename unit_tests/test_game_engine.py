@@ -38,7 +38,7 @@ class TestGameEngineStationRepairs(unittest.TestCase):
             "repair_remaining_turns": BASE_REPAIR_TURNS,
             "repair_agent_id": None,
         }
-        self.engine = GameEngine(self.state)
+        self.engine = GameEngine(self.state, survival_use_rl=False)
 
     def test_failed_station_tile_is_walkable(self):
         """Failed station tiles should remain walkable so agents can step on to repair."""

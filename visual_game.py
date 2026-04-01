@@ -31,7 +31,11 @@ TILE_SIZE = 32  # Size of each tile in pixels
 CAMERA_WIDTH = 800  # Width of game view
 CAMERA_HEIGHT = 600  # Height of game view
 SIDEBAR_WIDTH = 300  # Width of sidebar
-SIDEBAR_TAB_BAR_HEIGHT = 36  # Height of tab row (Colony | Agents | Tasks)
+SIDEBAR_TAB_BAR_HEIGHT = 32  # Height of tab row (Colony | Agents | Tasks)
+# Vertical slice per agent in Agents tab (scroll + hover hit-test must stay in sync)
+SIDEBAR_AGENT_ROW_PX = 76
+# Pixels from window top to agent list = tab bar + content pad + "Agents (n):" heading block
+SIDEBAR_AGENTS_LIST_TOP = SIDEBAR_TAB_BAR_HEIGHT + 6 + 22
 WINDOW_WIDTH = CAMERA_WIDTH + SIDEBAR_WIDTH
 WINDOW_HEIGHT = CAMERA_HEIGHT
 TURN_INTERVAL_SECONDS = 8.0  # Seconds between automatic turns (slower for easier interaction)
@@ -89,6 +93,10 @@ POWERUP_AUTO_CALORIES = "auto_calories"
 POWERUP_AUTO_INTEGRITY = "auto_integrity"
 AUTO_WALK_THRESHOLD = 20.0  # Percent below which agent auto-walks to station
 VISUAL_REPAIR_AGENT_CAP = 3
+# Colonist map sprite height/width ≈ this fraction of on-screen tile size
+COLONIST_SPRITE_TILE_FRAC = 0.9
+# Station building art: longest edge = this × colonist sprite size (~3× “people” scale)
+STATION_SPRITE_VS_COLONIST = 3.0
 
 # Game States
 STATE_MENU = "menu"
@@ -158,6 +166,69 @@ def _station_tiles(center_x: int, center_y: int, size: int) -> List[Tuple[int, i
     return tiles
 
 
+_THREAT_LABELS = {
+    "oxygen_depletion": "Oxygen critical",
+    "oxygen_low": "Oxygen low",
+    "calories_depletion": "Food critical",
+    "calories_low": "Food low",
+    "integrity_depletion": "Structure critical",
+    "integrity_low": "Structure low",
+    "insufficient_agents": "Short on crew",
+    "structural_failure_risk": "Structure at risk",
+    "agent_oxygen_depletion": "Colonists: O2 critical",
+    "agent_oxygen_low": "Colonists: O2 low",
+    "agent_calories_depletion": "Colonists: food critical",
+    "agent_calories_low": "Colonists: food low",
+}
+
+
+def _humanize_survival_threat(threat: str) -> str:
+    """Turn assessor threat keys into short sidebar labels."""
+    key = str(threat).strip()
+    if key in _THREAT_LABELS:
+        return _THREAT_LABELS[key]
+    return key.replace("_", " ").title()
+
+
+def _task_destination_from_id(task_id: Any) -> Optional[Tuple[int, int]]:
+    """Parse world (x, y) from planner task ids like task_-3_5_12."""
+    tid = str(task_id or "")
+    if not tid.startswith("task_"):
+        return None
+    parts = tid.split("_")
+    if len(parts) < 3:
+        return None
+    try:
+        return int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+
+
+def _format_sidebar_task_line(task: Dict[str, Any]) -> str:
+    """One-line task summary for the Tasks tab."""
+    dest = _task_destination_from_id(task.get("task_id"))
+    agent_id = task.get("agent_id")
+    progress = float(task.get("progress", 0.0))
+    pct = int(max(0, min(100, round(progress * 100))))
+    who = f"agent {agent_id}" if agent_id is not None else "unassigned"
+    if dest:
+        return f"Go to {dest[0]}, {dest[1]} — {who} — {pct}%"
+    return f"En route — {who} — {pct}%"
+
+
+def _format_event_task_location(loc: Any) -> str:
+    """Short location text for an event-driven task row."""
+    if isinstance(loc, (list, tuple)) and len(loc) >= 2:
+        try:
+            return f"{int(loc[0])}, {int(loc[1])}"
+        except (TypeError, ValueError):
+            pass
+    s = str(loc)
+    if "_" in s:
+        return s.replace("_", " ").title()
+    return s
+
+
 class Powerup:
     """A pickup that grants an agent an auto-walk ability (e.g. auto-go to oxygen when O2 < 20%)."""
     def __init__(self, x: int, y: int, powerup_type: str):
@@ -195,6 +266,10 @@ class VisualGame:
         self.font = pygame.font.Font(None, 24)
         self.font_large = pygame.font.Font(None, 48)
         self.font_small = pygame.font.Font(None, 18)
+        # Smaller type for sidebar stats only (menus / map keep font_small)
+        self.font_sidebar_title = pygame.font.Font(None, 18)
+        self.font_sidebar_body = pygame.font.Font(None, 13)
+        self.font_tab = pygame.font.Font(None, 15)
         
         # Game state
         self.game_state = STATE_MENU
@@ -303,6 +378,9 @@ class VisualGame:
 
         # Pause flag (e.g., when window loses focus)
         self.paused: bool = False
+
+        # Latest Module 6 survival assessment (updated each turn for testing / debug UI)
+        self.last_survival_assessment: Optional[Dict[str, Any]] = None
 
         # --- Sprites / textures (loaded from assets/) ---
         # Terrain tiles (filenames can be adjusted if yours differ)
@@ -432,48 +510,38 @@ class VisualGame:
                     return False
             return True
         
-        # Candidate centers: for 2x2, center can be in [MIN+1, MAX-2]; for 3x3, [MIN+1, MAX-3]
+        # Candidate centers for 2×2 stations (smaller map footprint than 3×3)
         valid_2x2 = []
-        valid_3x3 = []
         for cx in range(WORLD_MIN_X + 1, WORLD_MAX_X - 1):
             for cy in range(WORLD_MIN_Y + 1, WORLD_MAX_Y - 1):
                 if is_valid_placement(cx, cy, 2, occupied):
                     valid_2x2.append((cx, cy))
-                if is_valid_placement(cx, cy, 3, occupied):
-                    valid_3x3.append((cx, cy))
-        
-        if not valid_3x3 or not valid_2x2:
-            # Fallback: use fixed positions if map is too crowded
+
+        if len(valid_2x2) < 3:
             return [
                 ResourceStation("oxy_station_1", STATION_OXYGEN, -10, -10, size=2),
                 ResourceStation("cal_station_1", STATION_CALORIES, 10, -10, size=2),
-                ResourceStation("int_station_1", STATION_INTEGRITY, 0, 10, size=3),
+                ResourceStation("int_station_1", STATION_INTEGRITY, 0, 10, size=2),
             ]
-        
-        rng.shuffle(valid_3x3)
+
         rng.shuffle(valid_2x2)
-        
-        # Place integrity station first (3x3), then two 2x2 (oxygen, calories)
-        stations = []
-        int_cx, int_cy = valid_3x3[0]
-        occupied.update(_station_tiles(int_cx, int_cy, 3))
-        stations.append(ResourceStation("int_station_1", STATION_INTEGRITY, int_cx, int_cy, size=3))
-        
+        stations: List[ResourceStation] = []
         for (cx, cy) in valid_2x2:
             if not is_valid_placement(cx, cy, 2, occupied):
                 continue
             occupied.update(_station_tiles(cx, cy, 2))
-            if len(stations) == 1:
+            if len(stations) == 0:
+                stations.append(ResourceStation("int_station_1", STATION_INTEGRITY, cx, cy, size=2))
+            elif len(stations) == 1:
                 stations.append(ResourceStation("oxy_station_1", STATION_OXYGEN, cx, cy, size=2))
             else:
                 stations.append(ResourceStation("cal_station_1", STATION_CALORIES, cx, cy, size=2))
                 break
         if len(stations) < 3:
-            # Fallback again
             return [
                 ResourceStation("oxy_station_1", STATION_OXYGEN, -10, -10, size=2),
                 ResourceStation("cal_station_1", STATION_CALORIES, 10, -10, size=2),
-                ResourceStation("int_station_1", STATION_INTEGRITY, 0, 10, size=3),
+                ResourceStation("int_station_1", STATION_INTEGRITY, 0, 10, size=2),
             ]
         return stations
     
@@ -574,6 +642,7 @@ class VisualGame:
         engine = GameEngine(initial_state)
         self.game = engine
         self._apply_ai_settings_to_engine()
+        self.last_survival_assessment = engine.survival_assessor.assess_survival(engine.state)
         return engine
 
     def _difficulty_defaults(self, difficulty: str) -> Dict[str, float]:
@@ -686,7 +755,12 @@ class VisualGame:
     def _get_scaled_tile_size(self) -> float:
         """Get TILE_SIZE scaled by zoom level."""
         return TILE_SIZE * self.zoom_level
-    
+
+    def _colonist_map_sprite_px(self) -> int:
+        """On-screen pixel size for colonist sprites (matches _draw_agents)."""
+        ts = int(self._get_scaled_tile_size())
+        return max(16, int(ts * COLONIST_SPRITE_TILE_FRAC))
+
     def _world_to_screen(self, world_x: int, world_y: int) -> Tuple[int, int]:
         """Convert world coordinates to screen coordinates (tile center)."""
         ts = self._get_scaled_tile_size()
@@ -828,8 +902,7 @@ class VisualGame:
 
             if img is not None:
                 # Scale agent sprite with zoom so it stays proportional to tiles
-                ts = int(self._get_scaled_tile_size())
-                size = max(16, int(ts * 0.9))  # slightly smaller than full tile
+                size = self._colonist_map_sprite_px()
                 scaled = pygame.transform.smoothscale(img, (size, size))
                 rect = scaled.get_rect(center=(screen_x, screen_y))
                 self.screen.blit(scaled, rect)
@@ -971,38 +1044,63 @@ class VisualGame:
             pygame.draw.rect(self.screen, color, tab_rect)
             if i > 0:
                 pygame.draw.line(self.screen, (60, 60, 70), (tab_rect.left, 4), (tab_rect.left, SIDEBAR_TAB_BAR_HEIGHT - 4), 1)
-            text_surf = self.font_small.render(label, True, COLOR_TEXT)
+            text_surf = self.font_tab.render(label, True, COLOR_TEXT)
             text_rect = text_surf.get_rect(center=tab_rect.center)
             self.screen.blit(text_surf, text_rect)
 
-        content_top = SIDEBAR_TAB_BAR_HEIGHT + 10
+        content_top = SIDEBAR_TAB_BAR_HEIGHT + 6
         y_offset = content_top
 
         # Content area depends on active tab
         if self.sidebar_tab == "colony":
             # Colony: resources, turn, recruit
-            title = self.font.render("Colony Status", True, COLOR_TEXT)
+            title = self.font_sidebar_title.render("Colony Status", True, COLOR_TEXT)
             self.screen.blit(title, (sidebar_x + 10, y_offset))
-            y_offset += 32
+            y_offset += 22
             y_offset = self._draw_resource_bar(sidebar_x + 10, y_offset, "Oxygen", avg_oxygen, COLOR_RESOURCE_OXYGEN)
             y_offset = self._draw_resource_bar(sidebar_x + 10, y_offset, "Calories", avg_calories, COLOR_RESOURCE_CALORIES)
             y_offset = self._draw_resource_bar(sidebar_x + 10, y_offset, "Integrity", avg_integrity, COLOR_RESOURCE_INTEGRITY)
-            y_offset += 16
-            turn_text = self.font.render(f"Turn: {state.turn_number}", True, COLOR_TEXT)
+            y_offset += 6
+            turn_text = self.font_sidebar_title.render(f"Turn: {state.turn_number}", True, COLOR_TEXT)
             self.screen.blit(turn_text, (sidebar_x + 10, y_offset))
-            y_offset += 40
+            y_offset += 20
+            # Colony outlook (heuristic or Q estimate; no raw state ids / method names)
+            dbg = self.last_survival_assessment
+            if dbg:
+                sp = float(dbg.get("survival_probability", 0.0))
+                threats = dbg.get("critical_threats") or []
+                ttf = dbg.get("time_to_failure")
+                outlook_color = (160, 210, 160) if sp >= 0.65 else (220, 190, 130) if sp >= 0.4 else (220, 150, 130)
+                main_line = self.font_sidebar_body.render(f"Outlook: {sp:.0%}", True, outlook_color)
+                self.screen.blit(main_line, (sidebar_x + 10, y_offset))
+                y_offset += 14
+                if threats:
+                    labels = [_humanize_survival_threat(t) for t in threats[:3]]
+                    extra = "…" if len(threats) > 3 else ""
+                    watch = self.font_sidebar_body.render(f"Watch: {', '.join(labels)}{extra}", True, (200, 170, 150))
+                    self.screen.blit(watch, (sidebar_x + 10, y_offset))
+                    y_offset += 13
+                elif sp < 0.65 and ttf is not None:
+                    hint = self.font_sidebar_body.render(f"If trends hold: crisis in ~{ttf} turns", True, (180, 165, 140))
+                    self.screen.blit(hint, (sidebar_x + 10, y_offset))
+                    y_offset += 13
+            else:
+                pending = self.font_sidebar_body.render("Outlook: —", True, (120, 120, 130))
+                self.screen.blit(pending, (sidebar_x + 10, y_offset))
+                y_offset += 14
+            y_offset += 8
             RECRUIT_COST = (30, 30, 30)
             can_recruit = (
                 agents and avg_oxygen >= RECRUIT_COST[0]
                 and avg_calories >= RECRUIT_COST[1]
                 and avg_integrity >= RECRUIT_COST[2]
             )
-            recruit_rect = pygame.Rect(sidebar_x + 10, y_offset, self.sidebar_width - 20, 36)
+            recruit_rect = pygame.Rect(sidebar_x + 10, y_offset, self.sidebar_width - 20, 28)
             self.recruit_button_rect = recruit_rect
             recruit_color = COLOR_BUTTON_SELECTED if can_recruit else (80, 60, 60)
             pygame.draw.rect(self.screen, recruit_color, recruit_rect)
             pygame.draw.rect(self.screen, COLOR_TEXT, recruit_rect, 2)
-            recruit_text = self.font_small.render("Recruit Agent (30 each)", True, COLOR_TEXT)
+            recruit_text = self.font_sidebar_body.render("Recruit Agent (30 each)", True, COLOR_TEXT)
             self.screen.blit(recruit_text, recruit_text.get_rect(center=recruit_rect.center))
             self.agent_scroll_up_rect = None
             self.agent_scroll_down_rect = None
@@ -1015,11 +1113,11 @@ class VisualGame:
             agents_content_width = self.sidebar_width - agents_gutter
             agents_bar_max_width = agents_content_width - 50  # bars start at sidebar_x + 50
 
-            agents_title = self.font.render(f"Agents ({len(state.agents)}):", True, COLOR_TEXT)
+            agents_title = self.font_sidebar_title.render(f"Agents ({len(state.agents)}):", True, COLOR_TEXT)
             self.screen.blit(agents_title, (sidebar_x + 10, y_offset))
-            y_offset += 28
+            y_offset += 22
             agents_per_page = 5
-            agent_entry_height = 96  # height per agent block (content ~88 + separator gap 8)
+            agent_entry_height = SIDEBAR_AGENT_ROW_PX
             total_agents = len(state.agents)
             max_scroll = max(0, total_agents - agents_per_page)
             self.agent_list_scroll = max(0, min(self.agent_list_scroll, max_scroll))
@@ -1027,7 +1125,7 @@ class VisualGame:
             agents_list_height = agents_per_page * agent_entry_height
 
             # Scroll column: track and buttons sit entirely in the gutter (no overlap with content)
-            scroll_btn_size = 22
+            scroll_btn_size = 20
             scroll_track_x = sidebar_x + self.sidebar_width - agents_gutter
             scroll_track_width = 18
             scroll_track_inner_width = 10
@@ -1083,19 +1181,20 @@ class VisualGame:
                 loc = agent.get("location", (0, 0))
                 is_selected = (self.selected_agent_id == agent_id and status != "dead")
                 is_hovered = (self.hovered_agent_id == agent_id and status != "dead")
+                row_hi = SIDEBAR_AGENT_ROW_PX - 6
                 if is_hovered and not is_selected:
-                    hover_rect = pygame.Rect(sidebar_x + 5, agent_entry_start_y - 5, agents_content_width - 10, 88)
+                    hover_rect = pygame.Rect(sidebar_x + 5, agent_entry_start_y - 3, agents_content_width - 10, row_hi)
                     pygame.draw.rect(self.screen, (70, 70, 30), hover_rect)
                     pygame.draw.rect(self.screen, (255, 255, 0), hover_rect, 1)
                 if is_selected:
-                    highlight_rect = pygame.Rect(sidebar_x + 5, agent_entry_start_y - 5, agents_content_width - 10, 88)
+                    highlight_rect = pygame.Rect(sidebar_x + 5, agent_entry_start_y - 3, agents_content_width - 10, row_hi)
                     pygame.draw.rect(self.screen, (60, 80, 100), highlight_rect)
                     pygame.draw.rect(self.screen, (255, 255, 0), highlight_rect, 2)
                 agent_text = f"{agent_id}: {name} ({status})"
                 text_color = (150, 150, 150) if status == "dead" else (COLOR_TEXT if not is_selected else (255, 255, 200))
-                text_surface = self.font_small.render(agent_text, True, text_color)
+                text_surface = self.font_sidebar_body.render(agent_text, True, text_color)
                 self.screen.blit(text_surface, (sidebar_x + 10, y_offset))
-                y_offset += 20
+                y_offset += 14
                 if status == "dead":
                     y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "O2", 0, (80, 80, 80), max_bar_width=agents_bar_max_width)
                     y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "Cal", 0, (80, 80, 80), max_bar_width=agents_bar_max_width)
@@ -1105,9 +1204,9 @@ class VisualGame:
                     y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "Cal", calories, COLOR_RESOURCE_CALORIES, max_bar_width=agents_bar_max_width)
                     y_offset = self._draw_small_bar(sidebar_x + 20, y_offset, "Int", integrity, COLOR_RESOURCE_INTEGRITY, max_bar_width=agents_bar_max_width)
                 loc_text = f"  Loc: {loc[0]}, {loc[1]}"
-                text_surface = self.font_small.render(loc_text, True, (255, 255, 200) if is_selected else COLOR_TEXT)
+                text_surface = self.font_sidebar_body.render(loc_text, True, (255, 255, 200) if is_selected else COLOR_TEXT)
                 self.screen.blit(text_surface, (sidebar_x + 10, y_offset))
-                y_offset += 18
+                y_offset += 12
                 powers = self.agent_powerups.get(agent_id, set())
                 if powers and status != "dead":
                     badges = []
@@ -1119,14 +1218,14 @@ class VisualGame:
                         badges.append("Int")
                     if badges:
                         auto_text = "Auto: " + " ".join(badges)
-                        badge_surface = self.font_small.render(auto_text, True, (150, 220, 150))
+                        badge_surface = self.font_sidebar_body.render(auto_text, True, (150, 220, 150))
                         self.screen.blit(badge_surface, (sidebar_x + 10, y_offset))
-                y_offset += 20
+                y_offset += 12
                 # Separator line between agents (stops at content edge, not under scrollbar)
                 if idx < len(visible_agents) - 1:
                     line_y = y_offset
                     pygame.draw.line(self.screen, (70, 70, 80), (sidebar_x + 10, line_y), (agents_content_right - 6, line_y), 1)
-                    y_offset += 8
+                    y_offset += 5
 
         else:
             # Tasks tab
@@ -1134,101 +1233,101 @@ class VisualGame:
             self.agent_scroll_up_rect = None
             self.agent_scroll_down_rect = None
             self.event_task_rects = []
-            tasks_title = self.font.render("Active Tasks", True, COLOR_TEXT)
+            tasks_title = self.font_sidebar_title.render("In progress", True, COLOR_TEXT)
             self.screen.blit(tasks_title, (sidebar_x + 10, y_offset))
-            y_offset += 30
+            y_offset += 22
             for task in state.active_tasks:
-                task_id = task.get("task_id", "?")
-                agent_id = task.get("agent_id", None)
-                progress = task.get("progress", 0.0)
-                task_text = f"{task_id} (Agent {agent_id}, {progress*100:.0f}%)"
-                text_surface = self.font_small.render(task_text, True, COLOR_TEXT)
+                task_text = _format_sidebar_task_line(task)
+                text_surface = self.font_sidebar_body.render(task_text, True, COLOR_TEXT)
                 self.screen.blit(text_surface, (sidebar_x + 10, y_offset))
-                y_offset += 22
+                y_offset += 16
 
-            # Event tasks created from adversarial phase (click to auto-dispatch closest agent)
-            y_offset += 10
-            event_title = self.font.render("Event Tasks", True, COLOR_TEXT)
+            # Event tasks: tap a row to assign the nearest free agent
+            y_offset += 6
+            event_title = self.font_sidebar_title.render("Needs you", True, COLOR_TEXT)
             self.screen.blit(event_title, (sidebar_x + 10, y_offset))
-            y_offset += 24
+            y_offset += 18
+            hint = self.font_sidebar_body.render("Tap a row to dispatch someone nearby.", True, (130, 130, 145))
+            self.screen.blit(hint, (sidebar_x + 10, y_offset))
+            y_offset += 15
 
             unresolved_indices = [i for i, et in enumerate(self.event_tasks) if not et.get("resolved", False)]
             if unresolved_indices:
                 for i in unresolved_indices:
                     et = self.event_tasks[i]
                     ev_type = str(et.get("event_type", "event")).replace("_", " ").title()
-                    ev_loc = et.get("location", "unknown")
-                    row_rect = pygame.Rect(sidebar_x + 8, y_offset - 2, self.sidebar_width - 16, 20)
+                    ev_loc = _format_event_task_location(et.get("location", ""))
+                    row_rect = pygame.Rect(sidebar_x + 8, y_offset - 1, self.sidebar_width - 16, 17)
                     self.event_task_rects.append((row_rect, i))
                     pygame.draw.rect(self.screen, (75, 40, 40), row_rect)
                     pygame.draw.rect(self.screen, (200, 120, 120), row_rect, 1)
-                    row_text = f"[Click] {ev_type} @ {ev_loc}"
-                    text_surface = self.font_small.render(row_text, True, (255, 220, 220))
+                    row_text = f"{ev_type} · {ev_loc}"
+                    text_surface = self.font_sidebar_body.render(row_text, True, (255, 220, 220))
                     self.screen.blit(text_surface, (sidebar_x + 12, y_offset))
-                    y_offset += 22
+                    y_offset += 18
             else:
-                none_text = self.font_small.render("No unresolved event tasks.", True, (140, 140, 140))
+                none_text = self.font_sidebar_body.render("All quiet.", True, (140, 140, 140))
                 self.screen.blit(none_text, (sidebar_x + 10, y_offset))
-                y_offset += 22
+                y_offset += 16
 
             if not state.active_tasks and not unresolved_indices:
-                no_tasks = self.font_small.render("No active tasks.", True, (140, 140, 140))
+                no_tasks = self.font_sidebar_body.render("Nothing running right now.", True, (140, 140, 140))
                 self.screen.blit(no_tasks, (sidebar_x + 10, y_offset))
         
     
     def _draw_resource_bar(self, x: int, y: int, label: str, value: float, color: Tuple[int, int, int]) -> int:
         """Draw a resource bar and return next y position."""
-        label_text = self.font_small.render(label, True, COLOR_TEXT)
+        label_text = self.font_sidebar_body.render(label, True, COLOR_TEXT)
         self.screen.blit(label_text, (x, y))
-        
+
         bar_width = self.sidebar_width - 40
-        bar_height = 20
+        bar_height = 13
         bar_x = x
-        bar_y = y + 20
-        
+        bar_y = y + 14
+
         # Background
         bg_rect = pygame.Rect(bar_x, bar_y, bar_width, bar_height)
         pygame.draw.rect(self.screen, COLOR_RESOURCE_BAR_BG, bg_rect)
-        
+
         # Fill
         fill_width = int(bar_width * max(0, min(100, value)) / 100)
         fill_rect = pygame.Rect(bar_x, bar_y, fill_width, bar_height)
         pygame.draw.rect(self.screen, color, fill_rect)
-        
+
         # Border
-        pygame.draw.rect(self.screen, (0, 0, 0), bg_rect, 2)
-        
+        pygame.draw.rect(self.screen, (0, 0, 0), bg_rect, 1)
+
         # Value text
-        value_text = self.font_small.render(f"{value:.1f}%", True, COLOR_TEXT)
+        value_text = self.font_sidebar_body.render(f"{value:.1f}%", True, COLOR_TEXT)
         text_rect = value_text.get_rect(center=(bar_x + bar_width // 2, bar_y + bar_height // 2))
         self.screen.blit(value_text, text_rect)
-        
-        return bar_y + bar_height + 10
-    
+
+        return bar_y + bar_height + 4
+
     def _draw_small_bar(self, x: int, y: int, label: str, value: float, color: Tuple[int, int, int], max_bar_width: Optional[int] = None) -> int:
         """Draw a small resource bar and return next y position. max_bar_width limits bar width (e.g. when scrollbar is present)."""
         bar_width = SIDEBAR_WIDTH - 50
         if max_bar_width is not None:
             bar_width = min(bar_width, max_bar_width)
-        bar_height = 12
+        bar_height = 7
 
         # Label
-        label_text = self.font_small.render(f"{label}:", True, COLOR_TEXT)
+        label_text = self.font_sidebar_body.render(f"{label}:", True, COLOR_TEXT)
         self.screen.blit(label_text, (x, y))
 
         # Bar
-        bar_x = x + 30
+        bar_x = x + 22
         bar_y = y
 
         bg_rect = pygame.Rect(bar_x, bar_y, bar_width, bar_height)
         pygame.draw.rect(self.screen, COLOR_RESOURCE_BAR_BG, bg_rect)
-        
+
         fill_width = int(bar_width * max(0, min(100, value)) / 100)
         fill_rect = pygame.Rect(bar_x, bar_y, fill_width, bar_height)
         pygame.draw.rect(self.screen, color, fill_rect)
         pygame.draw.rect(self.screen, (0, 0, 0), bg_rect, 1)
-        
-        return bar_y + bar_height + 5
+
+        return bar_y + bar_height + 2
     
     def _draw_event_notification(self):
         """Draw event notification centered over the gameplay area with a readable backdrop."""
@@ -2115,6 +2214,7 @@ class VisualGame:
             
             # Execute turn with selected algorithm
             turn_report = self.game.execute_turn(player_tasks if player_tasks else None, algorithm=self.algorithm)
+            self.last_survival_assessment = turn_report.get("survival_assessment")
             
             # Check for deaths after turn (resources may have drained)
             self._check_agent_deaths()
@@ -2427,10 +2527,14 @@ class VisualGame:
             if img is not None:
                 margin = ts * 2  # Ensure visible when near screen
                 if -margin <= center_screen_x <= self.camera_width + margin and -margin <= center_screen_y <= self.camera_height + margin:
-                    # Scale building based on zoom (proportional to tile size)
-                    scale_factor = self._get_scaled_tile_size() / TILE_SIZE
-                    new_w = max(1, int(img.get_width() * scale_factor))
-                    new_h = max(1, int(img.get_height() * scale_factor))
+                    # Scale building so its longest side ≈ STATION_SPRITE_VS_COLONIST × colonist sprite
+                    colonist_px = self._colonist_map_sprite_px()
+                    target = max(24, int(colonist_px * STATION_SPRITE_VS_COLONIST))
+                    iw, ih = img.get_width(), img.get_height()
+                    longest = max(iw, ih)
+                    scale = target / float(longest)
+                    new_w = max(1, int(round(iw * scale)))
+                    new_h = max(1, int(round(ih * scale)))
                     scaled = pygame.transform.smoothscale(img, (new_w, new_h))
                     rect = scaled.get_rect(center=(center_screen_x, center_screen_y))
                     self.screen.blit(scaled, rect)
@@ -2459,25 +2563,30 @@ class VisualGame:
                         self.screen.blit(overlay, rect.topleft)
                         pygame.draw.rect(self.screen, (255, 220, 80), rect, max(2, ts // 10))
             else:
-                # Fallback: colored rectangles as before
+                # Fallback: one square at station center, same visual weight as textured art (~3× colonist)
                 if station.station_type == STATION_OXYGEN:
                     color = COLOR_STATION_OXYGEN
                 elif station.station_type == STATION_CALORIES:
                     color = COLOR_STATION_CALORIES
                 else:
                     color = COLOR_STATION_INTEGRITY
-                for x, y in tiles:
-                    if WORLD_MIN_X <= x < WORLD_MAX_X and WORLD_MIN_Y <= y < WORLD_MAX_Y:
-                        screen_x, screen_y = self._world_to_screen(x, y)
-                        if -ts <= screen_x <= self.camera_width + ts and -ts <= screen_y <= self.camera_height + ts:
-                            rect = pygame.Rect(screen_x - ts // 2, screen_y - ts // 2, ts, ts)
-                            pygame.draw.rect(self.screen, color, rect)
-                            pygame.draw.rect(self.screen, (0, 0, 0), rect, 2)
-                            if is_failed:
-                                pygame.draw.line(self.screen, (255, 80, 80), rect.topleft, rect.bottomright, 2)
-                                pygame.draw.line(self.screen, (255, 80, 80), rect.topright, rect.bottomleft, 2)
-                            elif is_warning:
-                                pygame.draw.rect(self.screen, (255, 220, 80), rect, 2)
+                margin = ts * 2
+                if -margin <= center_screen_x <= self.camera_width + margin and -margin <= center_screen_y <= self.camera_height + margin:
+                    colonist_px = self._colonist_map_sprite_px()
+                    box = max(24, int(colonist_px * STATION_SPRITE_VS_COLONIST))
+                    rect = pygame.Rect(
+                        center_screen_x - box // 2,
+                        center_screen_y - box // 2,
+                        box,
+                        box,
+                    )
+                    pygame.draw.rect(self.screen, color, rect)
+                    pygame.draw.rect(self.screen, (0, 0, 0), rect, 2)
+                    if is_failed:
+                        pygame.draw.line(self.screen, (255, 80, 80), rect.topleft, rect.bottomright, max(2, box // 16))
+                        pygame.draw.line(self.screen, (255, 80, 80), rect.topright, rect.bottomleft, max(2, box // 16))
+                    elif is_warning:
+                        pygame.draw.rect(self.screen, (255, 220, 80), rect, max(2, box // 16))
 
             # Warning indicator for stations about to fail.
             if is_warning and -ts <= center_screen_x <= self.camera_width + ts and -ts <= center_screen_y <= self.camera_height + ts:
@@ -3122,8 +3231,8 @@ class VisualGame:
                     if mouse_x < self.camera_width:
                         self.hovered_agent_id = self._get_agent_id_at_screen(mouse_x, mouse_y)
                     elif mouse_x >= self.camera_width and self.sidebar_tab == "agents":
-                        agents_list_top = SIDEBAR_TAB_BAR_HEIGHT + 10 + 28
-                        agent_entry_height = 96
+                        agents_list_top = SIDEBAR_AGENTS_LIST_TOP
+                        agent_entry_height = SIDEBAR_AGENT_ROW_PX
                         agents_per_page = 5
                         state = self.game.get_state()
                         if agents_list_top <= mouse_y < agents_list_top + agents_per_page * agent_entry_height:

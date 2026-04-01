@@ -35,19 +35,34 @@ class GameEngine:
     - Resolution: Apply resource consumption and events
     """
     
-    def __init__(self, initial_state: ColonyState = None):
+    def __init__(
+        self,
+        initial_state: ColonyState = None,
+        *,
+        survival_use_rl: bool = True,
+        survival_train_episodes: int = 800,
+    ):
         """
         Initialize game engine with modules.
         
         Args:
             initial_state: Starting colony state (or None for default)
+            survival_use_rl: If True (default), Module 6 uses tabular Q-learning after offline training.
+            survival_train_episodes: Offline RL episodes when survival_use_rl is True.
         """
         self.state = initial_state or ColonyState()
         self.rule_engine = RuleEngine()
         self.task_planner = TaskPlanner(self.state)
         self.event_resolver = EventResolver()
-        self.survival_assessor = SurvivalAssessor(use_rl=False)
-        
+        self.survival_assessor = SurvivalAssessor(use_rl=survival_use_rl)
+        if survival_use_rl:
+            self.survival_assessor.train_q_learning(
+                episodes=survival_train_episodes,
+                max_steps_per_episode=12,
+                epsilon=0.15,
+                seed=42,
+            )
+
         # Initialize AI Director with available events
         self.available_events = self._create_default_events()
         self.ai_director = AIDirector(self.available_events)

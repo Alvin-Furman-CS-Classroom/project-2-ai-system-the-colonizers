@@ -44,6 +44,7 @@ def main() -> None:
     save_placeholder(r"powerups\powerup_auto_oxygen.png", (32, 32), (0, 191, 255, 255))
     save_placeholder(r"powerups\powerup_auto_calories.png", (32, 32), (255, 165, 0, 255))
     save_placeholder(r"powerups\powerup_auto_integrity.png", (32, 32), (255, 69, 0, 255))
+    save_placeholder(r"powerups\powerup_speed.png", (32, 32), (154, 255, 120, 255))
 
     # UI backgrounds (match window size roughly: 1100x600)
     save_placeholder(r"ui\menu_background.png", (1100, 600), (20, 20, 35, 255))

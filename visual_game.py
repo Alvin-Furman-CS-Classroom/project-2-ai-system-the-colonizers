@@ -13,10 +13,16 @@ import os
 from typing import Dict, List, Tuple, Optional, Any
 from src.game_engine import GameEngine
 from src.module1_state.colony_state import ColonyState
-from src.module2_search.task_planner import Task
+from src.module2_search.task_planner import Task, TaskPlanner
 from src.module1_state.procedural_tiles import clear_tile_cache
+from src.module1_state.movement_bonus import (
+    effective_move_multiplier,
+    prune_expired_speed_boosts,
+)
 from src.module1_state.tree_generation import (
+    VIEWPORT_TREES_K,
     base_wood_quota,
+    ensure_viewport_trees,
     generate_world_trees,
     try_harvest_trees,
 )
@@ -103,7 +109,48 @@ STATION_INTEGRITY = "integrity_station"
 POWERUP_AUTO_OXYGEN = "auto_oxygen"
 POWERUP_AUTO_CALORIES = "auto_calories"
 POWERUP_AUTO_INTEGRITY = "auto_integrity"
+POWERUP_SPEED_BOOST = "speed_boost"
 AUTO_WALK_THRESHOLD = 20.0  # Percent below which agent auto-walks to station
+
+
+def _powerup_params_for_difficulty(difficulty: str) -> Dict[str, Any]:
+    """Per-turn spawn chance, max on map, type weights (O2, Cal, Int, Speed). Start is always 1 powerup."""
+    d = (difficulty or "normal").lower()
+    table = {
+        "easy": {
+            "max_on_map": 11,
+            "turn_spawn_p": 0.36,
+            "weights": (0.20, 0.20, 0.20, 0.40),
+        },
+        "normal": {
+            "max_on_map": 8,
+            "turn_spawn_p": 0.24,
+            "weights": (0.24, 0.24, 0.24, 0.28),
+        },
+        "hard": {
+            "max_on_map": 5,
+            "turn_spawn_p": 0.13,
+            "weights": (0.28, 0.28, 0.28, 0.16),
+        },
+    }
+    return table.get(d, table["normal"])
+
+
+def _random_powerup_type(rng: random.Random, weights: Tuple[float, ...]) -> str:
+    r = rng.random()
+    total = sum(weights)
+    acc = 0.0
+    types = (
+        POWERUP_AUTO_OXYGEN,
+        POWERUP_AUTO_CALORIES,
+        POWERUP_AUTO_INTEGRITY,
+        POWERUP_SPEED_BOOST,
+    )
+    for t, w in zip(types, weights):
+        acc += w / total
+        if r <= acc:
+            return t
+    return types[-1]
 VISUAL_REPAIR_AGENT_CAP = 3
 # Colonist map sprite height/width ≈ this fraction of on-screen tile size
 COLONIST_SPRITE_TILE_FRAC = 0.9
@@ -119,6 +166,9 @@ STATE_CONTROLS = "controls"  # Controls help screen
 STATE_PLAYING = "playing"
 STATE_CONFIRM_QUIT = "confirm_quit"
 STATE_GAME_OVER = "game_over"
+
+# Typing this digit sequence during play tops up colony wood (developer / QA testing).
+DEV_WOOD_CHEAT_CODE = "941481"
 
 
 class ResourceStation:
@@ -242,11 +292,11 @@ def _format_event_task_location(loc: Any) -> str:
 
 
 class Powerup:
-    """A pickup that grants an agent an auto-walk ability (e.g. auto-go to oxygen when O2 < 20%)."""
+    """Map pickup: auto-walk (O2/Cal/Int) or temporary speed boost (POWERUP_SPEED_BOOST)."""
     def __init__(self, x: int, y: int, powerup_type: str):
         self.x = x
         self.y = y
-        self.powerup_type = powerup_type  # POWERUP_AUTO_OXYGEN, etc.
+        self.powerup_type = powerup_type  # POWERUP_* constants
 
 
 class VisualGame:
@@ -373,12 +423,14 @@ class VisualGame:
         # then set self.resource_stations = self._choose_station_placements(state, self.current_stage).
         self.current_stage = 0
         
-        # Powerups on the map (spawned at map gen; one of each auto type for now)
+        # Powerups on the map: one at start, more spawn randomly each turn (capped by difficulty)
         self.powerups: List[Powerup] = []
         # Which agents have which powerups: agent_id -> set of powerup_type
         self.agent_powerups: Dict[int, set] = {}
         # When agent is auto-walking to a station we set agent_auto_target[agent_id] = resource_type; clear when they reach station
         self.agent_auto_target: Dict[int, str] = {}
+        # Scaled terrain textures for current zoom: (terrain_name, ts_int) -> Surface
+        self._tile_scale_cache: Dict[Tuple[str, int], Any] = {}
 
         # ESC confirmation overlay (in-game)
         self.confirm_quit_selection = 0  # 0=Resume, 1=Quit to Menu
@@ -393,6 +445,9 @@ class VisualGame:
 
         # Latest Module 6 survival assessment (updated each turn for testing / debug UI)
         self.last_survival_assessment: Optional[Dict[str, Any]] = None
+
+        # Rolling buffer for DEV_WOOD_CHEAT_CODE (digits only)
+        self._dev_wood_cheat_buffer: str = ""
 
         # --- Sprites / textures (loaded from assets/) ---
         # Terrain tiles (filenames can be adjusted if yours differ)
@@ -477,6 +532,11 @@ class VisualGame:
         except Exception as e:
             print("Failed to load powerup_auto_integrity.png:", e)
             self.img_powerup_int = None
+        try:
+            self.img_powerup_speed = load_image("powerups", "powerup_speed.png")
+        except Exception as e:
+            print("Failed to load powerup_speed.png:", e)
+            self.img_powerup_speed = None
     
     def _set_world_size(self, size_tiles: int) -> None:
         """Apply a world-size preset by updating module-level world bounds."""
@@ -557,8 +617,8 @@ class VisualGame:
             ]
         return stations
     
-    def _spawn_initial_powerups(self, state: ColonyState) -> None:
-        """Spawn one of each auto-walk powerup at valid tiles (not on agents or stations). Deterministic from world_seed."""
+    def _powerup_occupied_cells(self, state: ColonyState) -> set:
+        """Tiles blocked for powerup placement."""
         occupied = set()
         for a in state.agents:
             if a.get("status") == "dead":
@@ -568,30 +628,128 @@ class VisualGame:
                 occupied.add((int(loc[0]), int(loc[1])))
         for station in self.resource_stations:
             occupied.update(station.get_tiles())
-        
-        candidates = []
-        for x in range(WORLD_MIN_X, WORLD_MAX_X):
-            for y in range(WORLD_MIN_Y, WORLD_MAX_Y):
-                if (x, y) in occupied:
-                    continue
-                tile = state.get_tile_at(x, y)
-                if tile.get("passable", True):
-                    candidates.append((x, y))
-        
-        rng = random.Random(state.world_seed + 9999)  # Different from station seed
-        rng.shuffle(candidates)
-        types = [POWERUP_AUTO_OXYGEN, POWERUP_AUTO_CALORIES, POWERUP_AUTO_INTEGRITY]
-        used = set()
-        for pt in candidates:
-            if len(self.powerups) >= 3:
-                break
-            if pt in used:
+        for t in state.world_trees or []:
+            if len(t) >= 2:
+                occupied.add((int(t[0]), int(t[1])))
+        for p in self.powerups:
+            occupied.add((p.x, p.y))
+        return occupied
+
+    def _sample_powerup_tile(
+        self, state: ColonyState, rng: random.Random, occupied: set
+    ) -> Optional[Tuple[int, int]]:
+        """Random passable non-water tile; bounded tries (no full-map scan)."""
+        for _ in range(256):
+            x = rng.randrange(WORLD_MIN_X, WORLD_MAX_X)
+            y = rng.randrange(WORLD_MIN_Y, WORLD_MAX_Y)
+            if (x, y) in occupied:
                 continue
-            used.add(pt)
-            self.powerups.append(Powerup(pt[0], pt[1], types[len(self.powerups)]))
+            tile = state.get_tile_at(x, y)
+            if not tile.get("passable", True):
+                continue
+            if tile.get("terrain") == "water":
+                continue
+            return (x, y)
+        return None
+
+    def _spawn_initial_powerups(self, state: ColonyState) -> None:
+        """
+        Exactly one starter powerup (difficulty-weighted type). More spawn randomly each turn.
+        RNG: world_seed + 9999.
+        """
+        params = _powerup_params_for_difficulty(state.difficulty)
+        rng = random.Random(int(state.world_seed) + 9999)
+        occupied = self._powerup_occupied_cells(state)
+        typ = _random_powerup_type(rng, params["weights"])
+        xy = self._sample_powerup_tile(state, rng, occupied)
+        if xy:
+            self.powerups.append(Powerup(xy[0], xy[1], typ))
+
+    def _camera_visible_world_rect(self) -> Tuple[int, int, int, int]:
+        """Visible tile AABB as half-open ranges [x0,x1), [y0,y1), aligned with _draw_map."""
+        scaled_tile_size = self._get_scaled_tile_size()
+        tiles_x = int(self.camera_width / scaled_tile_size) + 4
+        tiles_y = int(self.camera_height / scaled_tile_size) + 4
+        cx, cy = int(self.camera_x), int(self.camera_y)
+        start_x = max(WORLD_MIN_X, min(WORLD_MAX_X - tiles_x, cx - tiles_x // 2))
+        start_y = max(WORLD_MIN_Y, min(WORLD_MAX_Y - tiles_y, cy - tiles_y // 2))
+        end_x = min(start_x + tiles_x, WORLD_MAX_X)
+        end_y = min(start_y + tiles_y, WORLD_MAX_Y)
+        return start_x, start_y, end_x, end_y
+
+    def _wood_quota_met_for_advance(self, state: ColonyState) -> bool:
+        """Matches colony sidebar: Advance unlocks when wood ≥ floor wood quota."""
+        wq = float(getattr(state, "wood_quota", 0.0) or 0.0)
+        if wq <= 0.0:
+            return False
+        return float(state.resources.get("wood", 0.0)) >= wq
+
+    def _apply_dev_wood_cheat(self) -> None:
+        """Set colony wood to at least the current floor quota (unlocks Advance when quota > 0)."""
+        if not self.game:
+            return
+        state = self.game.state
+        wq = float(getattr(state, "wood_quota", 0.0) or 0.0)
+        cur = float(state.resources.get("wood", 0.0))
+        if wq > 0.0:
+            state.resources["wood"] = max(cur, wq)
+        else:
+            state.resources["wood"] = cur + 100.0
+        self._show_event("Dev: colony wood topped up")
+
+    def _ensure_viewport_trees_turn(self) -> None:
+        """Once per turn: guarantee K trees in the current camera view (see VIEWPORT_TREES_K)."""
+        if not self.game:
+            return
+        state = self.game.get_state()
+        if self._wood_quota_met_for_advance(state):
+            return
+        x0, y0, x1, y1 = self._camera_visible_world_rect()
+        d = (state.difficulty or "normal").lower()
+        k = int(VIEWPORT_TREES_K.get(d, VIEWPORT_TREES_K["normal"]))
+        rng = random.Random(
+            int(state.world_seed)
+            + int(state.turn_number) * 7919
+            + int(getattr(state, "floor_index", 1)) * 503
+            + 6621
+        )
+        ensure_viewport_trees(
+            state,
+            view_x0=x0,
+            view_y0=y0,
+            view_x1=x1,
+            view_y1=y1,
+            k=k,
+            rng=rng,
+        )
+
+    def _maybe_spawn_turn_powerup(self, state: ColonyState) -> None:
+        """
+        Random extra powerup each turn with probability p(difficulty).
+        RNG: world_seed + turn_number * 10007 + floor_index * 877 + 4243.
+        """
+        if self._wood_quota_met_for_advance(state):
+            return
+        params = _powerup_params_for_difficulty(state.difficulty)
+        if len(self.powerups) >= params["max_on_map"]:
+            return
+        rng = random.Random(
+            int(state.world_seed)
+            + int(state.turn_number) * 10007
+            + int(getattr(state, "floor_index", 1)) * 877
+            + 4243
+        )
+        if rng.random() >= params["turn_spawn_p"]:
+            return
+        occupied = self._powerup_occupied_cells(state)
+        typ = _random_powerup_type(rng, params["weights"])
+        xy = self._sample_powerup_tile(state, rng, occupied)
+        if xy:
+            self.powerups.append(Powerup(xy[0], xy[1], typ))
     
     def _create_initial_game(self) -> GameEngine:
         """Create initial game state with agents and resource stations."""
+        self._dev_wood_cheat_buffer = ""
         # Clear tile cache to ensure fresh map generation
         clear_tile_cache()
         self.event_tasks.clear()
@@ -637,7 +795,7 @@ class VisualGame:
         self.resource_stations = self._choose_station_placements(initial_state, self.current_stage)
         self._sync_stations_to_state(initial_state)
         
-        # Spawn one of each auto-walk powerup (deterministic from seed)
+        # One starter powerup; rest spawn per-turn (seed + 9999)
         self.powerups = []
         self.agent_powerups = {}
         self.agent_auto_target = {}
@@ -680,6 +838,7 @@ class VisualGame:
 
         self._apply_ai_settings_to_engine()
         self.last_survival_assessment = engine.survival_assessor.assess_survival(engine.state)
+        engine.warm_terrain_cache()
         return engine
 
     def _advance_to_next_floor(self) -> None:
@@ -717,7 +876,25 @@ class VisualGame:
             getattr(state, "director_aggression_bonus", 0.0) + knobs["director_aggression_delta"]
         )
 
+        # Parity with _create_initial_game: engine pathfinding / terrain grid use state.world_*.
+        state.world_min_x = WORLD_MIN_X
+        state.world_max_x = WORLD_MAX_X
+        state.world_min_y = WORLD_MIN_Y
+        state.world_max_y = WORLD_MAX_Y
+
+        # Drop planner/UI baggage from the previous floor (stale agent IDs, old events).
+        state.active_tasks.clear()
+        self.pending_tasks.clear()
+        self.event_tasks.clear()
+        self.event_task_rects.clear()
+        self.selected_agent_id = None
+        self.hovered_agent_id = None
+        self.drag_agent_id = None
+        self.drag_start_screen = None
+
         clear_tile_cache()
+        if self.game:
+            self.game.invalidate_terrain_cache()
         names = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
         count = min(max(1, self.starting_agents), 5)
         state.agents.clear()
@@ -726,7 +903,7 @@ class VisualGame:
             x, y = start_positions[i % len(start_positions)]
             x = max(WORLD_MIN_X, min(WORLD_MAX_X - 1, x + (i * 2 % 5 - 2)))
             y = max(WORLD_MIN_Y, min(WORLD_MAX_Y - 1, y + (i * 3 % 5 - 2)))
-            state.add_agent(
+            ok, errs = state.add_agent(
                 {
                     "id": i,
                     "name": names[i % len(names)],
@@ -738,6 +915,8 @@ class VisualGame:
                 },
                 validate=True,
             )
+            if not ok:
+                print(f"Warning: Advance floor failed to add agent: {errs}")
 
         self.resource_stations = self._choose_station_placements(state, int(state.floor_index))
         for sid in list(state.infrastructure.keys()):
@@ -760,6 +939,7 @@ class VisualGame:
         self._apply_ai_settings_to_engine()
         self.game.task_planner = TaskPlanner(state)
         self.last_survival_assessment = self.game.survival_assessor.assess_survival(state)
+        self.game.warm_terrain_cache()
         self._show_event(
             f"Floor {int(state.floor_index)} — wood quota {state.wood_quota:.0f}. Disasters active again."
         )
@@ -927,8 +1107,13 @@ class VisualGame:
                 img = self.img_tile_dirt
 
             if img is not None:
-                # Scale texture to current tile size so it zooms with the camera
-                scaled = pygame.transform.smoothscale(img, (ts, ts))
+                key = (terrain, ts)
+                scaled = self._tile_scale_cache.get(key)
+                if scaled is None:
+                    if len(self._tile_scale_cache) > 64:
+                        self._tile_scale_cache.clear()
+                    scaled = pygame.transform.smoothscale(img, (ts, ts))
+                    self._tile_scale_cache[key] = scaled
                 rect = pygame.Rect(left, top, ts, ts)
                 self.screen.blit(scaled, rect)
             else:
@@ -1011,7 +1196,16 @@ class VisualGame:
                     continue
                 x, y = float(loc[0]), float(loc[1])
             screen_x, screen_y = self._world_to_screen(x, y)
-            
+            ts = int(self._get_scaled_tile_size())
+            pad = max(ts * 2, self._colonist_map_sprite_px())
+            if (
+                screen_x < -pad
+                or screen_x > self.camera_width + pad
+                or screen_y < -pad
+                or screen_y > self.camera_height + pad
+            ):
+                continue
+
             # Choose sprite if available; fall back to circles if not
             img = None
             if status == "dead" and self.img_agent_dead:
@@ -1370,6 +1564,16 @@ class VisualGame:
                         auto_text = "Auto: " + " ".join(badges)
                         badge_surface = self.font_sidebar_body.render(auto_text, True, (150, 220, 150))
                         self.screen.blit(badge_surface, (sidebar_x + 10, y_offset))
+                        y_offset += 12
+                move_spd = float(agent.get("speed") or 1.0)
+                if status != "dead" and move_spd > 1.02:
+                    spd = self.font_sidebar_body.render(
+                        f"  Move speed: ×{move_spd:.2f}",
+                        True,
+                        (180, 200, 255),
+                    )
+                    self.screen.blit(spd, (sidebar_x + 10, y_offset))
+                    y_offset += 12
                 y_offset += 12
                 # Separator line between agents (stops at content edge, not under scrollbar)
                 if idx < len(visible_agents) - 1:
@@ -1735,11 +1939,25 @@ class VisualGame:
             return
         state = self.game.get_state()
         ts = self._get_scaled_tile_size()
+        scaled_tile_size = ts
+        tiles_x = int(self.camera_width / scaled_tile_size) + 4
+        tiles_y = int(self.camera_height / scaled_tile_size) + 4
+        camera_x_int = int(self.camera_x)
+        camera_y_int = int(self.camera_y)
+        start_x = max(WORLD_MIN_X, min(WORLD_MAX_X - tiles_x, camera_x_int - tiles_x // 2))
+        start_y = max(WORLD_MIN_Y, min(WORLD_MAX_Y - tiles_y, camera_y_int - tiles_y // 2))
+        end_x = min(start_x + tiles_x, WORLD_MAX_X)
+        end_y = min(start_y + tiles_y, WORLD_MAX_Y)
+        margin = 2
+        vmin_x, vmax_x = start_x - margin, end_x + margin
+        vmin_y, vmax_y = start_y - margin, end_y + margin
         for t in state.world_trees or []:
             if len(t) < 2:
                 continue
             wx, wy = int(t[0]), int(t[1])
             if not (WORLD_MIN_X <= wx < WORLD_MAX_X and WORLD_MIN_Y <= wy < WORLD_MAX_Y):
+                continue
+            if wx < vmin_x or wx >= vmax_x or wy < vmin_y or wy >= vmax_y:
                 continue
             sx, sy = self._world_to_screen(wx, wy)
             trunk_r = max(2, int(ts * 0.12))
@@ -1847,6 +2065,20 @@ class VisualGame:
                     self.confirm_quit_selection = 0
                     self.game_state = STATE_CONFIRM_QUIT
                     return True
+                elif self.game:
+                    ch = ""
+                    if event.unicode and len(event.unicode) == 1 and event.unicode.isdigit():
+                        ch = event.unicode
+                    elif pygame.K_0 <= event.key <= pygame.K_9:
+                        ch = str(event.key - pygame.K_0)
+                    elif pygame.K_KP0 <= event.key <= pygame.K_KP9:
+                        ch = str(event.key - pygame.K_KP0)
+                    if len(ch) == 1 and ch.isdigit():
+                        n = len(DEV_WOOD_CHEAT_CODE)
+                        self._dev_wood_cheat_buffer = (self._dev_wood_cheat_buffer + ch)[-n:]
+                        if self._dev_wood_cheat_buffer == DEV_WOOD_CHEAT_CODE:
+                            self._apply_dev_wood_cheat()
+                            self._dev_wood_cheat_buffer = ""
             
             if event.type == pygame.MOUSEBUTTONDOWN:
                 mouse_x, mouse_y = pygame.mouse.get_pos()
@@ -2189,7 +2421,6 @@ class VisualGame:
             return
         state = self.game.get_state()
         to_remove: List[int] = []
-        move_dist = self.agent_move_speed * dt_sec  # Distance to travel this frame
         
         for agent_id, path in list(self.agent_paths.items()):
             if not path:
@@ -2209,6 +2440,9 @@ class VisualGame:
             cur_x, cur_y = float(current_loc[0]), float(current_loc[1])
             # Use visual pos if we're mid-step, else current location
             vx, vy = self.agent_visual_pos.get(agent_id, (cur_x, cur_y))
+            agent_move = self.agent_move_speed * dt_sec * effective_move_multiplier(
+                state.agents[agent_index], state.turn_number
+            )
             
             # Skip path points we've already reached (use distance check for smoother diagonal movement)
             while path:
@@ -2237,17 +2471,25 @@ class VisualGame:
             
             # Move toward path[0] with smooth interpolation
             tx, ty = float(path[0][0]), float(path[0][1])
-            tile = state.get_tile_at(int(round(tx)), int(round(ty)))
-            if not tile.get("passable", True):
+            ix, iy = int(round(tx)), int(round(ty))
+            if not (
+                WORLD_MIN_X <= ix < WORLD_MAX_X
+                and WORLD_MIN_Y <= iy < WORLD_MAX_Y
+            ):
                 path.pop(0)
                 if not path:
                     to_remove.append(agent_id)
                     self.agent_visual_pos.pop(agent_id, None)
                 continue
-            
-            # Water slows movement (0.2x), other terrain normal speed
-            tile_speed = tile.get("move_speed", 1.0)
-            step_move_dist = move_dist * tile_speed
+
+            # Water slows (~0.2x): O(1) from engine terrain grid
+            if self.game:
+                tile_speed = self.game.terrain_move_speed_at(ix, iy)
+            else:
+                tile_speed = float(
+                    state.get_tile_at(ix, iy).get("move_speed", 1.0)
+                )
+            step_move_dist = agent_move * tile_speed
             
             # Calculate direction vector (normalized for smooth diagonal movement)
             dx, dy = tx - vx, ty - vy
@@ -2402,6 +2644,10 @@ class VisualGame:
             # Execute turn with selected algorithm
             turn_report = self.game.execute_turn(player_tasks if player_tasks else None, algorithm=self.algorithm)
             self.last_survival_assessment = turn_report.get("survival_assessment")
+            turns_state = self.game.get_state()
+            prune_expired_speed_boosts(turns_state.agents, turns_state.turn_number)
+            self._ensure_viewport_trees_turn()
+            self._maybe_spawn_turn_powerup(turns_state)
             
             # Check for deaths after turn (resources may have drained)
             self._check_agent_deaths()
@@ -2650,7 +2896,7 @@ class VisualGame:
             "Gameplay:",
             "  Recruit Agent - Click button (costs 30 each)",
             "  Stations restore resources (O/C/R icons)",
-            "  Powerups (O/Cal/Int circles): collect to grant",
+            "  Powerups (O/Cal/Int/S): one at start, more over time; S = permanent move speed",
             "  auto-walk (agent goes to station if that resource < 20%)",
             "  Agents die if any resource reaches 0",
             "  Sidebar: Colony | Agents | Tasks tabs",
@@ -2859,6 +3105,8 @@ class VisualGame:
                 img = self.img_powerup_cal
             elif p.powerup_type == POWERUP_AUTO_INTEGRITY and self.img_powerup_int:
                 img = self.img_powerup_int
+            elif p.powerup_type == POWERUP_SPEED_BOOST and self.img_powerup_speed:
+                img = self.img_powerup_speed
 
             if img is not None:
                 size = max(20, int(ts * 1.05))
@@ -2877,6 +3125,9 @@ class VisualGame:
                 elif p.powerup_type == POWERUP_AUTO_CALORIES:
                     color = COLOR_STATION_CALORIES
                     icon = "C"
+                elif p.powerup_type == POWERUP_SPEED_BOOST:
+                    color = (120, 220, 120)
+                    icon = "S"
                 else:
                     color = COLOR_STATION_INTEGRITY
                     icon = "R"
@@ -3211,7 +3462,7 @@ class VisualGame:
         state = self.game.get_state()
         to_remove = []
         for p in self.powerups:
-            for agent in state.agents:
+            for idx, agent in enumerate(state.agents):
                 if agent.get("status") == "dead":
                     continue
                 loc = agent.get("location")
@@ -3220,9 +3471,19 @@ class VisualGame:
                 if (int(loc[0]), int(loc[1])) != (p.x, p.y):
                     continue
                 agent_id = agent.get("id")
-                if agent_id is not None:
+                if agent_id is None:
+                    break
+                to_remove.append(p)
+                if p.powerup_type == POWERUP_SPEED_BOOST:
+                    cur = float(agent.get("speed") or 1.0)
+                    new_spd = min(2.25, cur * 1.5)
+                    state.update_agent(idx, {"speed": new_spd}, validate=False)
+                    a2 = state.agents[idx]
+                    a2.pop("speed_boost_end_turn", None)
+                    a2.pop("speed_boost_mult", None)
+                    self._show_event(f"Speed powerup! Permanent move speed ×{new_spd:.2f}")
+                else:
                     self.agent_powerups.setdefault(agent_id, set()).add(p.powerup_type)
-                    to_remove.append(p)
                     powerup_name = {
                         POWERUP_AUTO_OXYGEN: "Auto Oxygen",
                         POWERUP_AUTO_CALORIES: "Auto Calories",

@@ -22,7 +22,8 @@ Agent Schema:
     - "status": str - "active", "incapacitated", or "dead"
     - "skills": dict - Agent capabilities (optional)
     - "current_task": str or None - Currently assigned task ID (optional)
-    - "speed": float - Movement speed multiplier (optional)
+    - "speed": float - Movement speed multiplier (optional; speed powerup raises this permanently)
+    - "speed_boost_end_turn" / "speed_boost_mult": legacy keys removed on load; optional cleanup only
     - "efficiency": float - Task efficiency multiplier (optional)
 
 Infrastructure Schema:
@@ -67,14 +68,14 @@ class ColonyState:
         if state_data is None:
             state_data = self._create_empty_state()
         
-        self.agents: List[Dict[str, Any]] = state_data.get("agents", [])
+        self.agents: List[Dict[str, Any]] = list(state_data.get("agents") or [])
         self.resources: Dict[str, float] = state_data.get("resources", {
             "oxygen": 100.0,
             "calories": 100.0,
             "integrity": 100.0
         })
         self.infrastructure: Dict[str, Any] = state_data.get("infrastructure", {})
-        self.active_tasks: List[Dict[str, Any]] = state_data.get("active_tasks", [])
+        self.active_tasks: List[Dict[str, Any]] = list(state_data.get("active_tasks") or [])
         self.turn_number: int = state_data.get("turn_number", 0)
         self.world_seed: int = state_data.get("world_seed", 0)
         self.difficulty: str = state_data.get("difficulty", "normal")  # easy, normal, hard
@@ -82,9 +83,9 @@ class ColonyState:
         # Multi-floor / wood progression (colony-level wood accumulated toward per-floor quota)
         self.floor_index: int = int(state_data.get("floor_index", 1))
         self.wood_quota: float = float(state_data.get("wood_quota", 8.0))
-        self.world_trees: List[List[int]] = state_data.get("world_trees", [])
+        self.world_trees: List[List[int]] = list(state_data.get("world_trees") or [])
         self.prior_floor_summaries: List[Dict[str, Any]] = list(
-            state_data.get("prior_floor_summaries", [])
+            state_data.get("prior_floor_summaries") or []
         )
         self.floor_start_turn: int = int(state_data.get("floor_start_turn", 0))
         self.floor_disasters_count: int = int(state_data.get("floor_disasters_count", 0))

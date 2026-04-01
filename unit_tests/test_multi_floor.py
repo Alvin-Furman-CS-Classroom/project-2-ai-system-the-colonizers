@@ -5,14 +5,17 @@ import unittest
 
 from src.module1_state.colony_state import ColonyState
 from src.module1_state.floor_carryover import (
+    compute_stress_bin,
     next_floor_knobs,
     summarize_finished_floor,
 )
 from src.module1_state.tree_generation import (
+    base_wood_quota,
     generate_world_trees,
     maybe_spawn_progression_tree,
     try_harvest_trees,
 )
+from src.module2_search.task_planner import TaskPlanner
 from src.game_engine import GameEngine, NO_ADVERSARY_EVENT
 from src.module6_rl.q_learning import discretize_colony_state
 
@@ -150,6 +153,64 @@ class TestMultiFloor(unittest.TestCase):
         ok = maybe_spawn_progression_tree(s, rng=random.Random(1), spawn_probability=1.0)
         self.assertFalse(ok)
         self.assertEqual(len(s.world_trees), n)
+
+    def test_simulated_floor_advance_engine_stays_consistent(self):
+        """
+        Mirrors visual _advance_to_next_floor mutations (no pygame): stale active_tasks
+        cleared, trees/terrain replanned; next execute_turn must not raise.
+        """
+        s = self._state(
+            resources={
+                "oxygen": 90.0,
+                "calories": 90.0,
+                "integrity": 90.0,
+                "wood": 10.0,
+            },
+            wood_quota=8.0,
+            active_tasks=[
+                {"task_id": "task_1_2_5", "agent_id": 0, "progress": 0.4},
+            ],
+        )
+        eng = GameEngine(s, survival_use_rl=False, survival_train_episodes=0)
+        summary = summarize_finished_floor(
+            s,
+            int(s.floor_start_turn),
+            int(s.floor_disasters_count),
+            int(s.floor_deaths_count),
+            getattr(s, "turn_wood_quota_met", None),
+        )
+        s.prior_floor_summaries.append(summary)
+        knobs = next_floor_knobs(s.prior_floor_summaries, int(s.floor_index) + 1, s.difficulty)
+        s.rl_carryover_stress_bin = compute_stress_bin(summary)
+        s.floor_index = int(s.floor_index) + 1
+        s.world_seed = (int(s.world_seed) + 104729 * s.floor_index) % (2**31)
+        s.resources["wood"] = 0.0
+        s.wood_quota = float(base_wood_quota(s.difficulty, s.floor_index) + knobs["wood_quota_adjust"])
+        s.turn_wood_quota_met = None
+        s.active_tasks.clear()
+        s.agents.clear()
+        s.add_agent(
+            {
+                "id": 0,
+                "name": "A",
+                "location": (0, 0),
+                "oxygen": 80.0,
+                "calories": 80.0,
+                "integrity": 80.0,
+                "status": "active",
+            },
+            validate=True,
+        )
+        s.world_trees = generate_world_trees(
+            s, -5, 5, -5, 5, tree_density_multiplier=float(knobs["tree_density_multiplier"])
+        )
+        eng.invalidate_terrain_cache()
+        eng.task_planner = TaskPlanner(s)
+        eng.warm_terrain_cache()
+        eng.survival_assessor.assess_survival(s)
+        report = eng.execute_turn(None, algorithm="astar")
+        self.assertIn("phases", report)
+        self.assertEqual(len(s.active_tasks), 0)
 
 
 if __name__ == "__main__":

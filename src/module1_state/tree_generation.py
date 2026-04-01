@@ -17,15 +17,45 @@ from typing import List, Optional, Sequence, Tuple
 
 from src.module1_state.colony_state import ColonyState
 
-# Tunables: easy has ~2.2x the tree density of hard on the same map.
+# Land fraction cap for tree placement — sparse; large maps get more trees only via area×density.
 _DIFFICULTY_TREE_FRACTION = {
-    "easy": 0.0020,
-    "normal": 0.0010,
-    "hard": 0.00045,
+    "easy": 0.0010,
+    "normal": 0.00052,
+    "hard": 0.00024,
 }
 
 # Tillable / wooded ground (grass per UX; dirt included so forest edges still work).
 _GROWABLE_TERRAINS = frozenset({"grass", "dirt"})
+
+# Upper bound on total trees (initial fill + viewport/top-ups); avoids runaway lists on huge maps.
+GLOBAL_TREE_CAP = 2000
+
+# Minimum trees in the current camera viewport (see ``ensure_viewport_trees``); keep sparse.
+VIEWPORT_TREES_K = {"easy": 1, "normal": 1, "hard": 1}
+
+
+def _is_compact_world(world_min_x: int, world_max_x: int, world_min_y: int, world_max_y: int) -> bool:
+    """Small/Medium presets (e.g. 40×40, 50×50): max side length ≤ 55 tiles."""
+    span_w = max(0, int(world_max_x) - int(world_min_x))
+    span_h = max(0, int(world_max_y) - int(world_min_y))
+    return max(span_w, span_h) <= 55
+
+
+def min_trees_for_candidate_count(
+    n_candidates: int, difficulty: str, *, large_world: bool = False
+) -> int:
+    """Sparse floors; ``large_world`` uses smaller minimums for density-driven big maps."""
+    if n_candidates <= 0:
+        return 0
+    d = (difficulty or "normal").lower()
+    if large_world:
+        div = {"easy": 450, "normal": 600, "hard": 800}.get(d, 600)
+        floor = {"easy": 5, "normal": 4, "hard": 3}.get(d, 4)
+    else:
+        div = {"easy": 320, "normal": 420, "hard": 550}.get(d, 420)
+        floor = {"easy": 6, "normal": 5, "hard": 4}.get(d, 5)
+    chunk = n_candidates // div
+    return max(3, min(floor + chunk, GLOBAL_TREE_CAP, n_candidates))
 
 
 def land_tree_density(difficulty: str) -> float:
@@ -42,7 +72,7 @@ def generate_world_trees(
     world_max_y: int,
     *,
     tree_density_multiplier: float = 1.0,
-    max_trees_cap: int = 400,
+    max_trees_cap: int = GLOBAL_TREE_CAP,
 ) -> List[List[int]]:
     """
     Deterministic sparse tree scatter from world_seed, floor_index, difficulty.
@@ -60,6 +90,40 @@ def generate_world_trees(
     )
 
     blocked = _blocked_positions(state, world_min_x, world_max_x, world_min_y, world_max_y)
+    span_w = max(0, int(world_max_x) - int(world_min_x))
+    span_h = max(0, int(world_max_y) - int(world_min_y))
+    area = span_w * span_h
+    compact = _is_compact_world(world_min_x, world_max_x, world_min_y, world_max_y)
+    wq = float(getattr(state, "wood_quota", 8.0) or 8.0)
+    half_quota_trees = max(3, int(round(0.5 * wq)))
+
+    # Large worlds: avoid O(area) nested loops at floor load; sample valid grass/land tiles.
+    if area > 12000:
+        approx_candidates = max(1, area - len(blocked))
+        min_n = min_trees_for_candidate_count(
+            approx_candidates, state.difficulty, large_world=True
+        )
+        target = int(approx_candidates * base)
+        target = max(min_n, 3, min(max_trees_cap, target))
+        trees: List[List[int]] = []
+        occ = set(blocked)
+        tries = 0
+        max_tries = target * 35 + 1600
+        while len(trees) < target and tries < max_tries:
+            tries += 1
+            x = rng.randrange(world_min_x, world_max_x)
+            y = rng.randrange(world_min_y, world_max_y)
+            if (x, y) in occ:
+                continue
+            tile = state.get_tile_at(x, y)
+            if not tile.get("passable", True):
+                continue
+            if tile.get("terrain") == "water":
+                continue
+            trees.append([int(x), int(y)])
+            occ.add((x, y))
+        return trees
+
     candidates: List[Tuple[int, int]] = []
     for x in range(world_min_x, world_max_x):
         for y in range(world_min_y, world_max_y):
@@ -75,10 +139,18 @@ def generate_world_trees(
     if not candidates:
         return []
 
-    target = int(len(candidates) * base)
-    target = max(3, min(max_trees_cap, target))
+    target_density = int(len(candidates) * base)
+    if compact:
+        # Small/Medium: aim for ~50% of wood quota in harvestable trees, capped by density.
+        target = min(half_quota_trees, target_density, max_trees_cap)
+        target = max(3, target)
+    else:
+        min_n = min_trees_for_candidate_count(
+            len(candidates), state.difficulty, large_world=True
+        )
+        target = max(min_n, 3, min(max_trees_cap, target_density))
     rng.shuffle(candidates)
-    trees: List[List[int]] = []
+    trees = []
     for x, y in candidates:
         if len(trees) >= target:
             break
@@ -161,23 +233,45 @@ def maybe_spawn_progression_tree(
         (int(t[0]), int(t[1])) for t in trees if len(t) >= 2
     }
 
-    candidates: List[Tuple[int, int]] = []
-    for x in range(wx0, wx1):
-        for y in range(wy0, wy1):
-            if (x, y) in blocked or (x, y) in occupied_trees:
-                continue
-            tile = state.get_tile_at(x, y)
-            if not tile.get("passable", True):
-                continue
-            if tile.get("terrain") not in _GROWABLE_TERRAINS:
-                continue
-            candidates.append((x, y))
-
-    if not candidates:
+    span_w = max(0, wx1 - wx0)
+    span_h = max(0, wy1 - wy0)
+    if span_w <= 0 or span_h <= 0:
         return False
 
-    rng.shuffle(candidates)
-    for (x, y) in candidates[:max_attempts]:
+    # Large worlds: avoid O(span_w * span_h) Python loops every spawn tick — sample random cells.
+    sample_budget = max(max_attempts, min(512, max(96, max_attempts * 8)))
+    small_map = span_w * span_h <= 3600
+
+    if small_map:
+        candidates: List[Tuple[int, int]] = []
+        for x in range(wx0, wx1):
+            for y in range(wy0, wy1):
+                if (x, y) in blocked or (x, y) in occupied_trees:
+                    continue
+                tile = state.get_tile_at(x, y)
+                if not tile.get("passable", True):
+                    continue
+                if tile.get("terrain") not in _GROWABLE_TERRAINS:
+                    continue
+                candidates.append((x, y))
+        if not candidates:
+            return False
+        rng.shuffle(candidates)
+        for (x, y) in candidates[:max_attempts]:
+            state.world_trees = list(trees) + [[int(x), int(y)]]
+            return True
+        return False
+
+    for _ in range(sample_budget):
+        x = rng.randrange(wx0, wx1)
+        y = rng.randrange(wy0, wy1)
+        if (x, y) in blocked or (x, y) in occupied_trees:
+            continue
+        tile = state.get_tile_at(x, y)
+        if not tile.get("passable", True):
+            continue
+        if tile.get("terrain") not in _GROWABLE_TERRAINS:
+            continue
         state.world_trees = list(trees) + [[int(x), int(y)]]
         return True
     return False
@@ -214,3 +308,95 @@ def try_harvest_trees(state: ColonyState, coords: Sequence[Tuple[int, int]]) -> 
     w = float(state.resources.get("wood", 0.0))
     state.resources["wood"] = w + float(harvested)
     return harvested
+
+
+def _trees_in_rect(
+    trees: List[List[int]], x0: int, y0: int, x1: int, y1: int
+) -> int:
+    """Count trees with integer coords in [x0,x1) × [y0,y1)."""
+    n = 0
+    for t in trees or []:
+        if len(t) < 2:
+            continue
+        x, y = int(t[0]), int(t[1])
+        if x0 <= x < x1 and y0 <= y < y1:
+            n += 1
+    return n
+
+
+def ensure_viewport_trees(
+    state: ColonyState,
+    *,
+    view_x0: int,
+    view_y0: int,
+    view_x1: int,
+    view_y1: int,
+    k: int,
+    margin_tiles: int = 5,
+    rng: Optional[random.Random] = None,
+    global_cap: int = GLOBAL_TREE_CAP,
+    sample_tries_per_need: int = 64,
+) -> int:
+    """
+    If fewer than ``k`` trees fall inside the viewport rectangle, add trees by sampling
+    an expanded band (viewport ± margin), without scanning the full map.
+
+    Rectangle bounds are half-open [x0,x1), [y0,y1) in world tile coordinates.
+    Returns the number of trees added.
+    """
+    if k <= 0:
+        return 0
+    wx0 = int(getattr(state, "world_min_x", -25))
+    wx1 = int(getattr(state, "world_max_x", 25))
+    wy0 = int(getattr(state, "world_min_y", -25))
+    wy1 = int(getattr(state, "world_max_y", 25))
+    if wx1 <= wx0 or wy1 <= wy0:
+        return 0
+
+    trees = list(state.world_trees or [])
+    have = _trees_in_rect(trees, view_x0, view_y0, view_x1, view_y1)
+    need = k - have
+    if need <= 0:
+        return 0
+    if len(trees) >= global_cap:
+        return 0
+
+    if rng is None:
+        rng = random.Random(
+            int(state.world_seed)
+            + int(state.turn_number) * 7919
+            + int(getattr(state, "floor_index", 1)) * 503
+            + 6621
+        )
+
+    ex0 = max(wx0, view_x0 - margin_tiles)
+    ex1 = min(wx1, view_x1 + margin_tiles)
+    ey0 = max(wy0, view_y0 - margin_tiles)
+    ey1 = min(wy1, view_y1 + margin_tiles)
+    if ex1 <= ex0 or ey1 <= ey0:
+        return 0
+
+    blocked = _blocked_positions(state, wx0, wx1, wy0, wy1)
+    occupied = {(int(t[0]), int(t[1])) for t in trees if len(t) >= 2}
+    added = 0
+    tries = 0
+    max_tries = max(sample_tries_per_need * need, sample_tries_per_need * 3)
+
+    while added < need and len(trees) < global_cap and tries < max_tries:
+        tries += 1
+        x = rng.randrange(ex0, ex1)
+        y = rng.randrange(ey0, ey1)
+        if (x, y) in blocked or (x, y) in occupied:
+            continue
+        tile = state.get_tile_at(x, y)
+        if not tile.get("passable", True):
+            continue
+        if tile.get("terrain") not in _GROWABLE_TERRAINS:
+            continue
+        trees.append([int(x), int(y)])
+        occupied.add((x, y))
+        added += 1
+
+    if added:
+        state.world_trees = trees
+    return added

@@ -31,6 +31,26 @@ class TestColonyState(unittest.TestCase):
         self.assertEqual(len(self.state.agents), 0)
         self.assertEqual(len(self.state.infrastructure), 0)
         self.assertEqual(len(self.state.active_tasks), 0)
+
+    def test_null_json_lists_coerced_to_empty(self):
+        """JSON null for list fields must not crash __init__ (e.g. load/save edge cases)."""
+        s = ColonyState(
+            {
+                "agents": None,
+                "resources": {"oxygen": 90.0, "calories": 90.0, "integrity": 90.0, "wood": 0.0},
+                "infrastructure": {},
+                "active_tasks": None,
+                "world_trees": None,
+                "prior_floor_summaries": None,
+                "turn_number": 0,
+                "world_seed": 1,
+                "difficulty": "normal",
+            }
+        )
+        self.assertEqual(s.agents, [])
+        self.assertEqual(s.active_tasks, [])
+        self.assertEqual(s.world_trees, [])
+        self.assertEqual(s.prior_floor_summaries, [])
     
     def test_consume_resources(self):
         """Test resource consumption."""

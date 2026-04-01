@@ -17,8 +17,8 @@ TERRAIN_DIRT = "dirt"
 
 TERRAIN_TYPES = [TERRAIN_GRASS, TERRAIN_WATER, TERRAIN_ROCK, TERRAIN_SAND, TERRAIN_DIRT]
 
-# Cache for generated tiles
-_tile_cache: Dict[Tuple[int, int, int], str] = {}
+# Cache for generated tiles (include difficulty — same seed can differ by difficulty)
+_tile_cache: Dict[Tuple[int, int, int, str], str] = {}
 
 # Cache for lake blob centers (generated once per seed+difficulty)
 _lake_blobs_cache: Dict[Tuple[int, str], List[Tuple[int, int, float]]] = {}
@@ -176,6 +176,36 @@ def _get_base_terrain(x: int, y: int, seed: int, difficulty: str) -> str:
     return TERRAIN_GRASS
 
 
+def build_move_speed_grid(
+    world_min_x: int,
+    world_max_x: int,
+    world_min_y: int,
+    world_max_y: int,
+    seed: int,
+    difficulty: str,
+) -> Tuple[List[float], int, int, int, int]:
+    """
+    Precompute move_speed for every cell in the world AABB (row-major: x fast, y slow).
+    Used by GameEngine for O(1) pathfinding / movement without per-cell get_tile dict churn.
+
+    Returns:
+        (move_speeds, world_min_x, world_min_y, width, height)
+    """
+    w = int(world_max_x) - int(world_min_x)
+    h = int(world_max_y) - int(world_min_y)
+    if w <= 0 or h <= 0:
+        return [], int(world_min_x), int(world_min_y), 0, 0
+    out: List[float] = []
+    dkey = str(difficulty or "normal")
+    sid = int(seed)
+    wx0, wy0 = int(world_min_x), int(world_min_y)
+    for y in range(wy0, wy0 + h):
+        for x in range(wx0, wx0 + w):
+            t = get_tile(x, y, sid, dkey)
+            out.append(float(t.get("move_speed", 1.0)))
+    return out, wx0, wy0, w, h
+
+
 def get_tile(x: int, y: int, seed: int = 0, difficulty: str = "normal") -> Dict[str, Any]:
     """
     Return procedural tile data for world coordinates (x, y).
@@ -197,8 +227,9 @@ def get_tile(x: int, y: int, seed: int = 0, difficulty: str = "normal") -> Dict[
         - "move_speed": float — movement speed multiplier (water is slower)
     """
     ix, iy = int(x), int(y)
-    cache_key = (ix, iy, seed)
-    
+    dkey = str(difficulty or "normal")
+    cache_key = (ix, iy, int(seed), dkey)
+
     # Check cache first
     if cache_key in _tile_cache:
         terrain = _tile_cache[cache_key]

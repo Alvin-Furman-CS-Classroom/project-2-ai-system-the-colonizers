@@ -10,7 +10,7 @@ Main game loop that coordinates all modules through the four phases:
 4. Resolution: Resource consumption and event application (Modules 1, 5)
 """
 
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import heapq
 import math
 from src.module1_state.colony_state import ColonyState
@@ -76,6 +76,65 @@ class GameEngine:
         # Initialize AI Director with available events
         self.available_events = self._create_default_events()
         self.ai_director = AIDirector(self.available_events)
+
+        # Precomputed terrain move_speed grid (invalidated when world/seed/floor/difficulty changes).
+        self._terrain_key: Optional[Tuple[Any, ...]] = None
+        self._terrain_move_speeds: Optional[List[float]] = None
+        self._terrain_wx0: int = 0
+        self._terrain_wy0: int = 0
+        self._terrain_w: int = 0
+        self._terrain_h: int = 0
+
+    def invalidate_terrain_cache(self) -> None:
+        """Call after clear_tile_cache or any change to world bounds / seed / floor / difficulty."""
+        self._terrain_key = None
+        self._terrain_move_speeds = None
+
+    def warm_terrain_cache(self) -> None:
+        """Precompute move_speed grid (call after load / floor change to avoid a first-interaction hitch)."""
+        self._ensure_terrain_grid()
+
+    def _terrain_identity_key(self) -> Tuple[Any, ...]:
+        s = self.state
+        return (
+            int(s.world_min_x),
+            int(s.world_max_x),
+            int(s.world_min_y),
+            int(s.world_max_y),
+            int(s.world_seed),
+            str(s.difficulty or "normal"),
+            int(getattr(s, "floor_index", 1)),
+        )
+
+    def _ensure_terrain_grid(self) -> None:
+        key = self._terrain_identity_key()
+        if self._terrain_key == key and self._terrain_move_speeds is not None:
+            return
+        from src.module1_state.procedural_tiles import build_move_speed_grid
+
+        ms, wx0, wy0, w, h = build_move_speed_grid(
+            key[0], key[1], key[2], key[3], key[4], key[5]
+        )
+        self._terrain_move_speeds = ms
+        self._terrain_wx0 = wx0
+        self._terrain_wy0 = wy0
+        self._terrain_w = w
+        self._terrain_h = h
+        self._terrain_key = key
+
+    def terrain_move_speed_at(self, x: int, y: int) -> float:
+        """O(1) terrain movement multiplier at world (x,y); builds grid once per world identity."""
+        self._ensure_terrain_grid()
+        if not self._terrain_move_speeds or self._terrain_w <= 0:
+            return 1.0
+        xi, yi = int(x), int(y)
+        if not (
+            self._terrain_wx0 <= xi < self._terrain_wx0 + self._terrain_w
+            and self._terrain_wy0 <= yi < self._terrain_wy0 + self._terrain_h
+        ):
+            return 1.0
+        idx = (yi - self._terrain_wy0) * self._terrain_w + (xi - self._terrain_wx0)
+        return self._terrain_move_speeds[idx]
 
     def _effective_base_repair_turns(self) -> int:
         return BASE_REPAIR_TURNS + int(getattr(self.state, "floor_repair_turns_extra", 0))
@@ -480,12 +539,7 @@ class GameEngine:
         mx_y = int(getattr(self.state, "world_max_y", 25))
         if not (mn_x <= x < mx_x and mn_y <= y < mx_y):
             return False
-        
-        # Check terrain passability only (agents can overlap)
-        tile = self.state.get_tile_at(x, y)
-        if not tile.get("passable", True):
-            return False
-
+        # Procedural terrain marks all tile types passable; skip get_tile_at (hot in A*).
         return True
     
     def _grid_pathfind(
@@ -544,19 +598,37 @@ class GameEngine:
         closed_set: set = set()
         came_from: Dict[Tuple[int, int], Optional[Tuple[int, int]]] = {start: None}
         g_score: Dict[Tuple[int, int], float] = {start: 0.0}
-        
+
+        # Admissible octile heuristic for 8-neighbor moves with cost 1 (cardinal) / sqrt(2) (diagonal).
+        d_diag = 1.4142135623730951
+
         def heuristic(pos: Tuple[int, int]) -> float:
-            """Euclidean distance heuristic."""
-            return math.hypot(goal[0] - pos[0], goal[1] - pos[1])
-        
+            dx = abs(goal[0] - pos[0])
+            dy = abs(goal[1] - pos[1])
+            dmin = min(dx, dy)
+            dmax = max(dx, dy)
+            return d_diag * dmin + (dmax - dmin)
+
         # 8-directional movement (cardinal + diagonal)
         neighbors = [
             (0, 1), (1, 0), (0, -1), (-1, 0),  # Cardinal
             (1, 1), (-1, 1), (1, -1), (-1, -1)  # Diagonal
         ]
-        
-        max_iterations = 5000  # Prevent infinite loops
+
+        mn_x = int(getattr(self.state, "world_min_x", -25))
+        mx_x = int(getattr(self.state, "world_max_x", 25))
+        mn_y = int(getattr(self.state, "world_min_y", -25))
+        mx_y = int(getattr(self.state, "world_max_y", 25))
+        w = max(1, mx_x - mn_x)
+        h = max(1, mx_y - mn_y)
+        area = w * h
+        # Many duplicate heap entries possible; cap scales with map size (fixes long paths on 200×200+).
+        max_iterations = min(max(area * 12, 50_000), 3_000_000)
         iterations = 0
+
+        self._ensure_terrain_grid()
+        ms = self._terrain_move_speeds
+        twx0, twy0, tw, th = self._terrain_wx0, self._terrain_wy0, self._terrain_w, self._terrain_h
         
         while open_set and iterations < max_iterations:
             iterations += 1
@@ -593,10 +665,15 @@ class GameEngine:
                     if not (allow_blocked_goal and neighbor == goal):
                         continue
                 
-                # Get tile to check movement speed (water is slow)
-                tile = self.state.get_tile_at(neighbor[0], neighbor[1])
-                tile_move_speed = tile.get("move_speed", 1.0)  # Default 1.0 for normal terrain
-                
+                # Movement cost from precomputed grid (avoids get_tile dict per neighbor)
+                nx_, ny_ = int(neighbor[0]), int(neighbor[1])
+                if ms is not None and tw > 0 and twx0 <= nx_ < twx0 + tw and twy0 <= ny_ < twy0 + th:
+                    tile_move_speed = ms[(ny_ - twy0) * tw + (nx_ - twx0)]
+                else:
+                    tile_move_speed = float(
+                        self.state.get_tile_at(nx_, ny_).get("move_speed", 1.0)
+                    )
+
                 # Base movement cost (1.0 for cardinal, ~1.414 for diagonal)
                 base_cost = 1.0 if abs(dx) + abs(dy) == 1 else 1.414
                 # Water is 0.2x speed, so cost is 5x (1/0.2 = 5) to discourage water paths

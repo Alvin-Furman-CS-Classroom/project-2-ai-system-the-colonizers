@@ -8,7 +8,7 @@
 
 ## Summary
 
-Module 1 and Module 2 code is well-structured, readable, and generally meets expectations. Naming is clear and consistent, functions are focused, and abstraction is appropriate (ColonyState, ColonyGraph, TaskPlanner). Minor issues: one TODO left in procedural_tiles.py, a few magic numbers in task_planner (partially mitigated by named constants), and optional tightening of type hints. No critical elegance issues; suitable for checkpoint submission with small cleanups.
+Module 1 and Module 2 code is well-structured, readable, and generally meets expectations. Naming is clear and consistent, functions are focused, and abstraction is appropriate (ColonyState, ColonyGraph, TaskPlanner). Minor issues: a few remaining magic numbers in task planning heuristics (largely mitigated by named constants) and optional tightening of type hints. No critical elegance issues; suitable for checkpoint submission.
 
 ---
 
@@ -20,7 +20,7 @@ Module 1 and Module 2 code is well-structured, readable, and generally meets exp
 | 2. Function and Method Design | 3 | Most functions are focused and under ~30 lines. A few methods (e.g. `validate_agent`, `validate_state`, `plan_with_astar` setup) are slightly long but still single-purpose. |
 | 3. Abstraction and Modularity | 4 | Clear separation: ColonyState + procedural_tiles (Module 1), ColonyGraph + TaskPlanner (Module 2). Reusable graph and pathfinding; no over-engineering. |
 | 4. Style Consistency | 4 | Consistent indentation, spacing, and formatting. Docstrings and type hints used uniformly. Would pass a linter with minimal or no warnings. |
-| 5. Code Hygiene | 3 | Mostly clean. One TODO in `procedural_tiles.py` (line 83). Named constants used in task_planner (DEFAULT_RESOURCE_COST, MAX_PRIORITY_FOR_PENALTY); a few literals remain (e.g. 0.1 for priority_penalty). No dead code or commented-out blocks. |
+| 5. Code Hygiene | 3 | Mostly clean. Named constants used in task_planner (DEFAULT_RESOURCE_COST, MAX_PRIORITY_FOR_PENALTY); a few literals remain (e.g. 0.1 for priority_penalty). No dead code or commented-out blocks. |
 | 6. Control Flow Clarity | 4 | Clear conditionals and loops; early returns used (e.g. in validation and pathfinding). Nesting kept shallow. |
 | 7. Pythonic Idioms | 4 | Good use of list comprehensions, dict.get, enumerate, dataclasses, type hints. Standard library (heapq, math, json, copy) used appropriately. |
 | 8. Error Handling | 3 | Validation returns (success, errors) tuples; invalid agent_id and missing nodes handled. No bare excepts. Could add more specific handling for malformed state_data or graph edges. |
@@ -33,7 +33,7 @@ Module 1 and Module 2 code is well-structured, readable, and generally meets exp
 
 ### Minor
 
-- **procedural_tiles.py, ~line 83:** TODO comment about passable flags and agent types. Either implement the note or remove the TODO before submission so the codebase is free of open TODOs for review.
+- **task_planner.py:** A few numeric literals (e.g. tuning weights) could be named constants if you want to tighten hygiene further; not required for a strong score.
 - **task_planner.py:** A few numeric literals (e.g. `0.1` for priority_penalty) could be named constants if you want to tighten hygiene further; not required for a 3.
 
 ### Positive
@@ -46,8 +46,7 @@ Module 1 and Module 2 code is well-structured, readable, and generally meets exp
 
 ## Action Items
 
-- [ ] Resolve or remove the TODO in `procedural_tiles.py` (passable/agent types).
-- [ ] (Optional) Extract remaining magic numbers in `task_planner.py` into named constants.
+- [ ] (Optional) Extract remaining numeric tuning literals in `task_planner.py` into named constants.
 - [ ] Run a linter (e.g. pylint, ruff) and fix any reported style issues before submission.
 
 ---

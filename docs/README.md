@@ -12,6 +12,8 @@ This folder contains checkpoint deliverables and project documentation. Files ar
 
 - **Checkpoint 3**
   - `checkpoint_3_CODE_ELEGANCE_REPORT_2026-03-19.md`
+  - `checkpoint_3_SUBMISSION_NOTES_2026-03-19.md`
+  - `checkpoint_3_DEMO_SCRIPT_2026-03-19.md`
 
 - **Checkpoint 4**
   - `checkpoint_4_CODE_ELEGANCE_REPORT_2026-04-02.md`

@@ -10,7 +10,7 @@ This theme naturally integrates multiple AI techniques: state representation for
 
 ## Team
 
-- [Your Name/Team Members]
+- Rick T. (project owner)
 
 ## Proposal
 
@@ -30,13 +30,17 @@ See `proposal.md` for the full project proposal.
 ## Repository Layout
 
 ```
-your-repo/
-├── src/                              # main system source code
-├── unit_tests/                       # unit tests (parallel structure to src/)
-├── integration_tests/                # integration tests (new folder for each module)
-├── .claude/skills/code-review/SKILL.md  # rubric-based agent review
-├── AGENTS.md                         # instructions for your LLM agent
-└── README.md                         # system overview and checkpoints
+project-2-ai-system-the-colonizers/
+├── src/                                   # main system source code (modules 1–6)
+├── unit_tests/                            # unit tests (parallel structure to src/)
+├── docs/                                  # checkpoint reports + project docs
+├── assets/                                # visual assets for pygame client
+├── visual_game.py                         # pygame visual client
+├── main.py                                # engine-only demonstration entrypoint
+├── run_tests.py                           # unified test runner
+├── .claude/skills/code-review/SKILL.md    # rubric-based review skill
+├── AGENTS.md                              # agent workflow + module plan
+└── README.md                              # system overview and checkpoint log
 ```
 
 ## Setup
@@ -48,9 +52,9 @@ your-repo/
 
 ### Installation
 
-1. Clone the repository:
+1. Clone the repository (or download as a zip):
    ```bash
-   git clone <repository-url>
+   git clone <your-repo-url>
    cd project-2-ai-system-the-colonizers
    ```
 
@@ -67,12 +71,17 @@ your-repo/
 
 ## Running
 
-### Run the game demonstration:
+### Run the engine-only demonstration:
 ```bash
 python main.py
 ```
 
 This will run a simple demonstration showing the game engine executing several turns with all modules working together.
+
+### Run the Pygame visual client:
+```bash
+python visual_game.py
+```
 
 ### Run individual modules:
 
@@ -142,11 +151,11 @@ python -m unittest discover -v
 
 | Checkpoint | Date | Modules Included | Status | Evidence |
 | ---------- | ---- | ---------------- | ------ | -------- |
-| 1 | Feb 11 | Module 1 (State), Module 2 (Search), Module 3 (Logic) | Pending |  |
-| 2 | Feb 26 | Module 2 (Search), Module 3 (Logic) | Pending |  |
-| 3 | March 19 | Module 4 (Game Theory), Module 5 (Events) | Ready | `docs/checkpoint_3_CODE_ELEGANCE_REPORT_2026-03-19.md`; `docs/checkpoint_3_SUBMISSION_NOTES_2026-03-19.md`; `docs/checkpoint_3_DEMO_SCRIPT_2026-03-19.md`; `python run_tests.py` (75/75) |
-| 4 | April 2 | Module 5 (Events), Module 6 (RL/Heuristics) | Pending | `docs/checkpoint_4_CODE_ELEGANCE_REPORT_2026-04-02.md`; `python run_tests.py` (116/116) |
-| 5 | April 16 | Module 6 (RL/Heuristics) | Pending | `docs/checkpoint_5_CODE_ELEGANCE_AND_MODULE_REPORT_2026-04-09.md`; `python run_tests.py` (116/116) |
+| 1 | Feb 11 | Module 1 (State), Module 2 (Search), Module 3 (Logic) | Ready | `docs/checkpoint_1_elegance_report.md`; `python run_tests.py` (116/116 as of 2026-04-09) |
+| 2 | Feb 26 | Module 2 (Search), Module 3 (Logic) | Ready | `docs/checkpoint_2_CODE_ELEGANCE_REPORT_2026-02-26.md`; `python run_tests.py` (116/116 as of 2026-04-09) |
+| 3 | March 19 | Module 4 (Game Theory), Module 5 (Events) | Ready | `docs/checkpoint_3_CODE_ELEGANCE_REPORT_2026-03-19.md`; `docs/checkpoint_3_SUBMISSION_NOTES_2026-03-19.md`; `docs/checkpoint_3_DEMO_SCRIPT_2026-03-19.md`; `python run_tests.py` (116/116 as of 2026-04-09) |
+| 4 | April 2 | Module 5 (Events), Module 6 (RL/Heuristics) | Ready | `docs/checkpoint_4_CODE_ELEGANCE_REPORT_2026-04-02.md`; `python run_tests.py` (116/116 as of 2026-04-09) |
+| 5 | April 16 | Module 6 (RL/Heuristics) | Ready | `docs/checkpoint_5_CODE_ELEGANCE_AND_MODULE_REPORT_2026-04-09.md`; `python run_tests.py` (116/116 as of 2026-04-09) |
 
 ### Docs
 

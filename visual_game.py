@@ -11,7 +11,7 @@ import math
 import random
 import os
 from typing import Dict, List, Tuple, Optional, Any, Set
-from src.game_engine import GameEngine
+from src.game_engine import GameEngine, director_budget_cap, director_income_per_turn
 from src.module1_state.colony_state import ColonyState
 from src.module2_search.task_planner import Task, TaskPlanner
 from src.module1_state.procedural_tiles import clear_tile_cache
@@ -24,6 +24,7 @@ from src.module1_state.tree_generation import (
     base_wood_quota,
     ensure_viewport_trees,
     generate_world_trees,
+    required_wood_for_quota,
     try_harvest_trees,
 )
 from src.module1_state.floor_carryover import (
@@ -41,6 +42,18 @@ def load_image(*path_parts: str) -> pygame.Surface:
     """Load an image from the assets directory with alpha preserved."""
     path = os.path.join(ASSET_DIR, *path_parts)
     return pygame.image.load(path).convert_alpha()
+
+
+def format_floor_banner(state: ColonyState) -> Tuple[str, str]:
+    """
+    Two-line floor banner for UI/tests (pure formatting; no pygame usage).
+    """
+    fi = int(getattr(state, "floor_index", 1))
+    seed = int(getattr(state, "world_seed", 0))
+    depth_m = 120 * fi
+    line1 = f"DECK {fi} — DEPTH {depth_m}m"
+    line2 = f"Scan ID: {seed:08d}"
+    return line1, line2
 
 # Constants
 TILE_SIZE = 32  # Size of each tile in pixels
@@ -171,6 +184,28 @@ STATE_GAME_OVER = "game_over"
 DEV_WOOD_CHEAT_CODE = "941481"
 # Spawns several speed-boost map pickups (developer / QA testing).
 DEV_SPEED_CHEAT_CODE = "2326"
+
+# Fun colonist names (stable: name = NAMES[id % len(NAMES)])
+COLONIST_NAMES = [
+    "Nova",
+    "Atlas",
+    "Juno",
+    "Orion",
+    "Vega",
+    "Saffron",
+    "Pixel",
+    "Gizmo",
+    "Echo",
+    "Zephyr",
+    "Mochi",
+    "Rook",
+    "Luna",
+    "Cosmo",
+    "Koda",
+    "Pip",
+    "Hazel",
+    "Nyx",
+]
 
 
 class ResourceStation:
@@ -747,20 +782,20 @@ class VisualGame:
 
     def _wood_quota_met_for_advance(self, state: ColonyState) -> bool:
         """Matches colony sidebar: Advance unlocks when wood ≥ floor wood quota."""
-        wq = float(getattr(state, "wood_quota", 0.0) or 0.0)
-        if wq <= 0.0:
+        wq = required_wood_for_quota(float(getattr(state, "wood_quota", 0.0) or 0.0))
+        if wq <= 0:
             return False
-        return float(state.resources.get("wood", 0.0)) >= wq
+        return float(state.resources.get("wood", 0.0)) >= float(wq)
 
     def _apply_dev_wood_cheat(self) -> None:
         """Set colony wood to at least the current floor quota (unlocks Advance when quota > 0)."""
         if not self.game:
             return
         state = self.game.state
-        wq = float(getattr(state, "wood_quota", 0.0) or 0.0)
+        wq = required_wood_for_quota(float(getattr(state, "wood_quota", 0.0) or 0.0))
         cur = float(state.resources.get("wood", 0.0))
-        if wq > 0.0:
-            state.resources["wood"] = max(cur, wq)
+        if wq > 0:
+            state.resources["wood"] = max(cur, float(wq))
         else:
             state.resources["wood"] = cur + 100.0
         self._show_event("Dev: colony wood topped up")
@@ -849,7 +884,7 @@ class VisualGame:
         initial_state = ColonyState({"world_seed": random_seed, "difficulty": self.difficulty})
         
         # Agent names for variety
-        names = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
+        names = COLONIST_NAMES
         # Spread initial agents around center
         start_positions = [(0, 0), (5, 5), (-5, 5), (-5, -5), (5, -5)]
         
@@ -985,7 +1020,7 @@ class VisualGame:
         clear_tile_cache()
         if self.game:
             self.game.invalidate_terrain_cache()
-        names = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
+        names = COLONIST_NAMES
         count = min(max(1, self.starting_agents), 5)
         persist_map_powerups = list(self.powerups)
         carry_agent_powerups = self._snapshot_agent_powerup_carryover(state, count)
@@ -1496,20 +1531,32 @@ class VisualGame:
                     self.screen.blit(pending, (sidebar_x + 10, y_offset))
                     y_offset += 14
             y_offset += 6
-            floor_line = self.font_sidebar_body.render(
-                f"Floor {int(getattr(state, 'floor_index', 1))}", True, (180, 200, 220)
-            )
+            banner1, banner2 = format_floor_banner(state)
+            floor_line = self.font_sidebar_body.render(banner1, True, (180, 200, 220))
             self.screen.blit(floor_line, (sidebar_x + 10, y_offset))
             y_offset += 14
-            wq = float(getattr(state, "wood_quota", 0.0) or 0.0)
+            scan_line = self.font_sidebar_body.render(banner2, True, (140, 155, 175))
+            self.screen.blit(scan_line, (sidebar_x + 10, y_offset))
+            y_offset += 14
+
+            pts = float(getattr(state, "director_points", 0.0) or 0.0)
+            inc = director_income_per_turn(state.difficulty, int(getattr(state, "floor_index", 1)))
+            cap = director_budget_cap(state.difficulty)
+            threat = self.font_sidebar_body.render(
+                f"Threat budget: {pts:.1f}/{cap:.0f} (+{inc:.1f}/turn)", True, (185, 140, 210)
+            )
+            self.screen.blit(threat, (sidebar_x + 10, y_offset))
+            y_offset += 14
+            wq_raw = float(getattr(state, "wood_quota", 0.0) or 0.0)
+            wq = required_wood_for_quota(wq_raw)
             wood_amt = float(state.resources.get("wood", 0.0))
             wood_line = self.font_sidebar_body.render(
-                f"Wood: {wood_amt:.0f} / {wq:.0f}", True, (210, 175, 120)
+                f"Wood: {wood_amt:.0f} / {wq}", True, (210, 175, 120)
             )
             self.screen.blit(wood_line, (sidebar_x + 10, y_offset))
             y_offset += 14
             self.advance_floor_button_rect = None
-            if wq > 0 and wood_amt >= wq:
+            if wq > 0 and wood_amt >= float(wq):
                 calm = self.font_sidebar_body.render(
                     "Disasters halted — safe to advance.", True, (120, 220, 140)
                 )
@@ -2417,7 +2464,7 @@ class VisualGame:
                 current = agent.get(r, 100.0)
                 agent[r] = max(0.0, current - amt)
         next_id = max((a.get("id", -1) for a in state.agents), default=-1) + 1
-        names = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta"]
+        names = COLONIST_NAMES
         spawn = self._find_empty_spawn_tile()
         if spawn is None:
             return

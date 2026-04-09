@@ -33,6 +33,10 @@ class Event:
     severity: float  # 0.0 to 1.0
     resource_impact: Dict[str, float]  # Changes to resources
     description: str
+    # Director "shop" fields (cost-based adversary)
+    cost: float = 0.0
+    cooldown_turns: int = 0
+    tags: Optional[List[str]] = None
     target_station_id: Optional[str] = None
     target_agent_id: Optional[int] = None
 
@@ -124,6 +128,120 @@ class AIDirector:
         if len(recent) > 8:
             recent = recent[-8:]
         memory["recent_events"] = recent
+
+    def _cooldown_key(self, event: Event) -> str:
+        """Key for per-event cooldown tracking in director memory."""
+        if event.event_type == "station_breakdown":
+            return f"{event.event_type}:{event.target_station_id or event.location}"
+        if event.target_agent_id is not None:
+            return f"{event.event_type}:agent_{int(event.target_agent_id)}"
+        return event.event_type
+
+    def _cooldowns(self, state: ColonyState) -> Dict[str, int]:
+        """Get or initialize cooldown map from director memory."""
+        memory = self._get_director_memory(state)
+        cds = memory.get("cooldowns")
+        if not isinstance(cds, dict):
+            cds = {}
+            memory["cooldowns"] = cds
+        # Normalize values to int >= 0
+        out: Dict[str, int] = {}
+        for k, v in cds.items():
+            try:
+                out[str(k)] = max(0, int(v))
+            except (TypeError, ValueError):
+                continue
+        memory["cooldowns"] = out
+        return out
+
+    def tick_cooldowns(self, state: ColonyState) -> None:
+        """Once per turn: decrement cooldown counters."""
+        cds = self._cooldowns(state)
+        if not cds:
+            return
+        to_del = []
+        for k, v in cds.items():
+            nv = max(0, int(v) - 1)
+            if nv <= 0:
+                to_del.append(k)
+            else:
+                cds[k] = nv
+        for k in to_del:
+            cds.pop(k, None)
+
+    def is_on_cooldown(self, state: ColonyState, event: Event) -> bool:
+        if int(getattr(event, "cooldown_turns", 0) or 0) <= 0:
+            return False
+        cds = self._cooldowns(state)
+        return self._cooldown_key(event) in cds
+
+    def apply_cooldown(self, state: ColonyState, event: Event) -> None:
+        cd = int(getattr(event, "cooldown_turns", 0) or 0)
+        if cd <= 0:
+            return
+        cds = self._cooldowns(state)
+        cds[self._cooldown_key(event)] = cd
+
+    def select_event_with_constraints(
+        self,
+        colony_state: ColonyState,
+        *,
+        affordable_points: float,
+        preferred_event_type: Optional[str] = None,
+    ) -> Event:
+        """
+        Select an event subject to a cost budget and cooldowns.
+
+        Uses the existing weakness-aware scorer, but filters out events that are either
+        unaffordable or currently on cooldown.
+        """
+        candidates = self._targeted_event_candidates(colony_state)
+        if not candidates:
+            if not self.available_events:
+                raise ValueError("No events available")
+            return self.available_events[0]
+
+        # Keep only affordable + not on cooldown candidates (optionally matching a preferred type).
+        filtered: List[Tuple[Event, float]] = []
+        for event, base_score in candidates:
+            if preferred_event_type and event.event_type != preferred_event_type:
+                continue
+            cost = float(getattr(event, "cost", 0.0) or 0.0)
+            if cost > float(affordable_points):
+                continue
+            if self.is_on_cooldown(colony_state, event):
+                continue
+            filtered.append((event, base_score))
+
+        if not filtered:
+            # Nothing affordable or everything cooled down.
+            return Event(
+                event_type="no_adversarial_event",
+                location="n/a",
+                severity=0.0,
+                resource_impact={},
+                description="Director saved points; no affordable disaster this turn.",
+                cost=0.0,
+            )
+
+        scored: List[Tuple[Event, float]] = []
+        for event, base_score in filtered:
+            final_score = self._apply_repetition_penalty(colony_state, event, base_score)
+            scored.append((event, final_score))
+
+        scored.sort(key=lambda t: t[1], reverse=True)
+        top_limit = max(2, min(self.selection_top_k, len(scored)))
+        top = scored[:top_limit]
+        weights = [max(0.001, s) for _, s in top]
+        seed = int(colony_state.world_seed) + int(colony_state.turn_number) * 9973
+        rng = random.Random(seed)
+        if rng.random() > self.randomness:
+            selected = top[0][0]
+        else:
+            selected = rng.choices([e for e, _ in top], weights=weights, k=1)[0]
+        self._remember_event(colony_state, selected)
+        self.apply_cooldown(colony_state, selected)
+        return selected
 
     def _isolation_scores(self, state: ColonyState) -> Dict[str, float]:
         """

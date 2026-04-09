@@ -14,10 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import heapq
 import math
 from src.module1_state.colony_state import ColonyState
-from src.module1_state.tree_generation import maybe_spawn_progression_tree
+from src.module1_state.tree_generation import maybe_spawn_progression_tree, required_wood_for_quota
 from src.module2_search.task_planner import TaskPlanner, Task
 from src.module3_logic.rule_engine import RuleEngine
 from src.module4_game_theory.ai_director import AIDirector, Event
+from src.module4_game_theory.budget_director import BudgetRLDirector, ACTION_SAVE
 from src.module5_events.event_resolver import EventResolver
 from src.module6_rl.survival_assessor import SurvivalAssessor
 
@@ -31,7 +32,24 @@ NO_ADVERSARY_EVENT = Event(
     0.0,
     {},
     "Wood quota met; no new disasters this turn.",
+    cost=0.0,
 )
+
+def director_income_per_turn(difficulty: str, floor_index: int) -> float:
+    """
+    Points gained each turn for the Director disaster budget.
+
+    Tuned so small hazards happen regularly, while station breakdowns require saving.
+    """
+    d = (difficulty or "normal").lower()
+    base = {"easy": 1.3, "normal": 1.7, "hard": 2.2}.get(d, 1.7)
+    depth = 0.08 * max(0, int(floor_index) - 1)
+    return base + depth
+
+
+def director_budget_cap(difficulty: str) -> float:
+    d = (difficulty or "normal").lower()
+    return {"easy": 10.0, "normal": 12.0, "hard": 15.0}.get(d, 12.0)
 
 
 class GameEngine:
@@ -51,6 +69,7 @@ class GameEngine:
         *,
         survival_use_rl: bool = True,
         survival_train_episodes: int = 800,
+        director_use_rl: bool = False,
     ):
         """
         Initialize game engine with modules.
@@ -76,6 +95,10 @@ class GameEngine:
         # Initialize AI Director with available events
         self.available_events = self._create_default_events()
         self.ai_director = AIDirector(self.available_events)
+        self.director_use_rl = bool(director_use_rl)
+        self.budget_rl_director = BudgetRLDirector(seed=42) if self.director_use_rl else None
+        self._director_prev_state: Optional[ColonyState] = None
+        self._director_last_action: Optional[str] = None
 
         # Precomputed terrain move_speed grid (invalidated when world/seed/floor/difficulty changes).
         self._terrain_key: Optional[Tuple[Any, ...]] = None
@@ -140,10 +163,10 @@ class GameEngine:
         return BASE_REPAIR_TURNS + int(getattr(self.state, "floor_repair_turns_extra", 0))
 
     def _adversary_suppressed_by_wood_quota(self) -> bool:
-        q = float(getattr(self.state, "wood_quota", 0.0) or 0.0)
-        if q <= 0.0:
+        q = required_wood_for_quota(float(getattr(self.state, "wood_quota", 0.0) or 0.0))
+        if q <= 0:
             return False
-        return float(self.state.resources.get("wood", 0.0)) >= q
+        return float(self.state.resources.get("wood", 0.0)) >= float(q)
 
     def _create_default_events(self) -> list[Event]:
         """Create default catalog of available events."""
@@ -154,6 +177,9 @@ class GameEngine:
                 severity=0.5,
                 resource_impact={"integrity": -17.0},
                 description="Agent trips over rough terrain and damages equipment",
+                cost=2.0,
+                cooldown_turns=0,
+                tags=["agent", "integrity"],
             ),
             Event(
                 event_type="agent_oxygen_tank_puncture",
@@ -161,6 +187,9 @@ class GameEngine:
                 severity=0.45,
                 resource_impact={"oxygen": -20.0},
                 description="An agent's oxygen tank is punctured",
+                cost=2.0,
+                cooldown_turns=0,
+                tags=["agent", "oxygen"],
             ),
             Event(
                 event_type="agent_ration_spoilage",
@@ -168,6 +197,9 @@ class GameEngine:
                 severity=0.4,
                 resource_impact={"calories": -18.0},
                 description="An agent's ration pack spoils unexpectedly",
+                cost=2.0,
+                cooldown_turns=0,
+                tags=["agent", "calories"],
             ),
         ]
 
@@ -263,6 +295,9 @@ class GameEngine:
                 - The selected `Event` instance.
                 - A small dictionary summary (type, location, severity) for reporting/visuals.
         """
+        # Cooldowns tick even when the Director is suppressed (so the next floor isn't blocked).
+        self.ai_director.tick_cooldowns(self.state)
+
         if self._adversary_suppressed_by_wood_quota():
             summary = {
                 "event_selected": NO_ADVERSARY_EVENT.event_type,
@@ -271,9 +306,44 @@ class GameEngine:
                 "target_station_id": None,
                 "target_agent_id": None,
                 "suppressed_by_wood_quota": True,
+                "director_points": float(getattr(self.state, "director_points", 0.0)),
+                "director_income": director_income_per_turn(
+                    self.state.difficulty, int(getattr(self.state, "floor_index", 1))
+                ),
             }
             return NO_ADVERSARY_EVENT, summary
-        selected_event = self.ai_director.select_event_minimax(self.state)
+
+        # Budget accrues every turn (even if nothing affordable is selected).
+        income = director_income_per_turn(self.state.difficulty, int(getattr(self.state, "floor_index", 1)))
+        cap = director_budget_cap(self.state.difficulty)
+        cur_pts = float(getattr(self.state, "director_points", 0.0))
+        cur_pts = min(cap, cur_pts + income)
+        self.state.director_points = cur_pts
+
+        preferred = None
+        director_action = None
+        if self.director_use_rl and self.budget_rl_director:
+            self._director_prev_state = self.state.copy()
+            director_action = self.budget_rl_director.choose_action(self.state, cur_pts)
+            self._director_last_action = director_action
+            pref = self.budget_rl_director.action_to_event_preference(director_action)
+            preferred = pref.get("event_type")
+            if director_action == ACTION_SAVE:
+                preferred = None
+
+        selected_event = self.ai_director.select_event_with_constraints(
+            self.state,
+            affordable_points=cur_pts,
+            preferred_event_type=preferred,
+        )
+
+        # Spend points if a real event was purchased.
+        spend = float(getattr(selected_event, "cost", 0.0) or 0.0)
+        if selected_event.event_type != NO_ADVERSARY_EVENT.event_type and spend > 0.0:
+            self.state.director_points = max(0.0, float(self.state.director_points) - spend)
+            self.state.director_last_purchase_turn = int(self.state.turn_number)
+            self.state.director_last_purchase_type = str(selected_event.event_type)
+
         summary = {
             "event_selected": selected_event.event_type,
             "location": selected_event.location,
@@ -282,6 +352,10 @@ class GameEngine:
             "target_station_id": selected_event.target_station_id,
             "target_agent_id": selected_event.target_agent_id,
             "suppressed_by_wood_quota": False,
+            "director_income": float(income),
+            "director_points": float(getattr(self.state, "director_points", 0.0)),
+            "director_event_cost": float(spend),
+            "director_action": director_action,
         }
         return selected_event, summary
 
@@ -359,13 +433,33 @@ class GameEngine:
         resolution_result = self.run_resolution_phase(selected_event)
         turn_report["phases"]["resolution"] = resolution_result
 
+        # Optional: learn director policy online from realized event effects.
+        if (
+            self.director_use_rl
+            and self.budget_rl_director
+            and self._director_prev_state is not None
+            and self._director_last_action is not None
+        ):
+            try:
+                self.budget_rl_director.learn_from_turn(
+                    self._director_prev_state,
+                    self._director_last_action,
+                    resolution_result,
+                    self.state,
+                )
+            except Exception:
+                # Training must never crash gameplay.
+                pass
+        self._director_prev_state = None
+        self._director_last_action = None
+
         # Survival Assessment (Module 6)
         survival_assessment = self.survival_assessor.assess_survival(self.state)
         turn_report["survival_assessment"] = survival_assessment
 
         # First turn wood reached quota (before incrementing turn counter)
-        wq = float(getattr(self.state, "wood_quota", 0.0) or 0.0)
-        if wq > 0 and float(self.state.resources.get("wood", 0.0)) >= wq:
+        wq = required_wood_for_quota(float(getattr(self.state, "wood_quota", 0.0) or 0.0))
+        if wq > 0 and float(self.state.resources.get("wood", 0.0)) >= float(wq):
             if getattr(self.state, "turn_wood_quota_met", None) is None:
                 self.state.turn_wood_quota_met = int(self.state.turn_number)
 

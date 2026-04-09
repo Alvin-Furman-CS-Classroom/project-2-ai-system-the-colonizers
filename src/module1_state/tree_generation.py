@@ -13,6 +13,7 @@ turn (stochastic) on grass/dirt until ``wood + len(trees) >= wood_quota``.
 from __future__ import annotations
 
 import random
+import math
 from typing import List, Optional, Sequence, Tuple
 
 from src.module1_state.colony_state import ColonyState
@@ -193,6 +194,20 @@ def base_wood_quota(difficulty: str, floor_index: int) -> float:
     return base + 0.5 * max(0, int(floor_index) - 1)
 
 
+def required_wood_for_quota(wood_quota: float) -> int:
+    """
+    Integer wood requirement shown to players and used for progression.
+
+    Carryover knobs can produce fractional quotas (e.g. 10.5). Round *up* so UI and
+    gating never disagree (no "11/10" surprises).
+    """
+    q = float(wood_quota or 0.0)
+    if q <= 0.0:
+        return 0
+    # Subtract a tiny epsilon so exact integers remain stable under float noise.
+    return int(math.ceil(q - 1e-9))
+
+
 def maybe_spawn_progression_tree(
     state: ColonyState,
     *,
@@ -206,14 +221,14 @@ def maybe_spawn_progression_tree(
 
     Returns True if a tree was added.
     """
-    wq = float(getattr(state, "wood_quota", 0.0) or 0.0)
-    if wq <= 0.0:
+    wq = required_wood_for_quota(float(getattr(state, "wood_quota", 0.0) or 0.0))
+    if wq <= 0:
         return False
     wood = float(state.resources.get("wood", 0.0))
-    if wood >= wq:
+    if wood >= float(wq):
         return False
     trees = state.world_trees or []
-    if wood + float(len(trees)) >= wq:
+    if wood + float(len(trees)) >= float(wq):
         return False
 
     if rng is None:

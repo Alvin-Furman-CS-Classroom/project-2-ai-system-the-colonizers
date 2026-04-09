@@ -98,6 +98,17 @@ class ColonyState:
             state_data.get("director_aggression_bonus", 0.0)
         )
 
+        # Cost-based disaster budget (Director "shop")
+        self.director_points: float = float(state_data.get("director_points", 0.0))
+        self.director_last_purchase_turn: Optional[int] = (
+            int(state_data.get("director_last_purchase_turn"))
+            if state_data.get("director_last_purchase_turn") is not None
+            else None
+        )
+        self.director_last_purchase_type: Optional[str] = state_data.get(
+            "director_last_purchase_type"
+        )
+
         # World AABB for pathfinding (defaults match legacy 50×50 centered at origin)
         self.world_min_x: int = int(state_data.get("world_min_x", -25))
         self.world_max_x: int = int(state_data.get("world_max_x", 25))
@@ -133,6 +144,9 @@ class ColonyState:
             "rl_carryover_stress_bin": 0,
             "floor_repair_turns_extra": 0,
             "director_aggression_bonus": 0.0,
+            "director_points": 0.0,
+            "director_last_purchase_turn": None,
+            "director_last_purchase_type": None,
             "world_min_x": -25,
             "world_max_x": 25,
             "world_min_y": -25,
@@ -165,6 +179,9 @@ class ColonyState:
             "rl_carryover_stress_bin": self.rl_carryover_stress_bin,
             "floor_repair_turns_extra": self.floor_repair_turns_extra,
             "director_aggression_bonus": self.director_aggression_bonus,
+            "director_points": self.director_points,
+            "director_last_purchase_turn": self.director_last_purchase_turn,
+            "director_last_purchase_type": self.director_last_purchase_type,
             "world_min_x": self.world_min_x,
             "world_max_x": self.world_max_x,
             "world_min_y": self.world_min_y,

@@ -309,6 +309,9 @@ class AIDirector:
                     severity=min(1.0, event.severity + (0.15 * agent_pressure)),
                     resource_impact=dict(event.resource_impact or {}),
                     description=event.description,
+                    cost=float(getattr(event, "cost", 0.0) or 0.0),
+                    cooldown_turns=int(getattr(event, "cooldown_turns", 0) or 0),
+                    tags=list(getattr(event, "tags", None) or []) or None,
                     target_station_id=None,
                     target_agent_id=int(agent.get("id")),
                 )
@@ -326,6 +329,9 @@ class AIDirector:
                     resource_impact={},
                     description=f"{r.capitalize()} station breakdown",
                     target_station_id=s.get("station_id", ""),
+                    cost=6.0,
+                    cooldown_turns=2,
+                    tags=["station", str(r)],
                 ),
                 score,
             ))

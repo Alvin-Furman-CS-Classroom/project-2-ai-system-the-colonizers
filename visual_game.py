@@ -55,6 +55,42 @@ def format_floor_banner(state: ColonyState) -> Tuple[str, str]:
     line2 = f"Scan ID: {seed:08d}"
     return line1, line2
 
+
+def _format_director_debug_lines(state: ColonyState) -> List[str]:
+    """Compact dev-only director stats for the sidebar HUD."""
+    pts = float(getattr(state, "director_points", 0.0) or 0.0)
+    inc = director_income_per_turn(state.difficulty, int(getattr(state, "floor_index", 1)))
+    cap = director_budget_cap(state.difficulty)
+    last_t = getattr(state, "director_last_purchase_turn", None)
+    last_ty = getattr(state, "director_last_purchase_type", None)
+    return [
+        f"Director pts: {pts:.1f}/{cap:.0f} (+{inc:.1f}/turn)",
+        f"Last buy: {last_ty or '—'} @ turn {last_t if last_t is not None else '—'}",
+    ]
+
+
+def _humanize_event_name(event_type: str) -> str:
+    s = str(event_type or "")
+    if not s:
+        return "Event"
+    return s.replace("_", " ").strip().title()
+
+
+def director_points_gain_for_powerup(powerup_type: str, difficulty: str) -> float:
+    """
+    How many Director points the player grants by collecting a powerup.
+
+    Rationale: powerups help the colony; the Director gets a small compensating budget boost.
+    """
+    d = (difficulty or "normal").lower()
+    mult = {"easy": 0.8, "normal": 1.0, "hard": 1.15}.get(d, 1.0)
+    base = 0.8
+    if powerup_type == POWERUP_SPEED_BOOST:
+        base = 1.2
+    elif powerup_type == POWERUP_GILLS:
+        base = 1.0
+    return float(base * mult)
+
 # Constants
 TILE_SIZE = 32  # Size of each tile in pixels
 CAMERA_WIDTH = 800  # Width of game view
@@ -123,27 +159,28 @@ POWERUP_AUTO_OXYGEN = "auto_oxygen"
 POWERUP_AUTO_CALORIES = "auto_calories"
 POWERUP_AUTO_INTEGRITY = "auto_integrity"
 POWERUP_SPEED_BOOST = "speed_boost"
+POWERUP_GILLS = "gills"
 AUTO_WALK_THRESHOLD = 20.0  # Percent below which agent auto-walks to station
 
 
 def _powerup_params_for_difficulty(difficulty: str) -> Dict[str, Any]:
-    """Per-turn spawn chance, max on map, type weights (O2, Cal, Int, Speed). Start is always 1 powerup."""
+    """Per-turn spawn chance, max on map, type weights (O2, Cal, Int, Speed, Gills). Start is always 1 powerup."""
     d = (difficulty or "normal").lower()
     table = {
         "easy": {
             "max_on_map": 11,
             "turn_spawn_p": 0.36,
-            "weights": (0.20, 0.20, 0.20, 0.40),
+            "weights": (0.18, 0.18, 0.18, 0.36, 0.10),
         },
         "normal": {
             "max_on_map": 8,
             "turn_spawn_p": 0.24,
-            "weights": (0.24, 0.24, 0.24, 0.28),
+            "weights": (0.22, 0.22, 0.22, 0.24, 0.10),
         },
         "hard": {
             "max_on_map": 5,
             "turn_spawn_p": 0.13,
-            "weights": (0.28, 0.28, 0.28, 0.16),
+            "weights": (0.26, 0.26, 0.26, 0.12, 0.10),
         },
     }
     return table.get(d, table["normal"])
@@ -158,6 +195,7 @@ def _random_powerup_type(rng: random.Random, weights: Tuple[float, ...]) -> str:
         POWERUP_AUTO_CALORIES,
         POWERUP_AUTO_INTEGRITY,
         POWERUP_SPEED_BOOST,
+        POWERUP_GILLS,
     )
     for t, w in zip(types, weights):
         acc += w / total
@@ -397,6 +435,7 @@ class VisualGame:
         self.current_event_text = None
         self.event_start_time = None
         self.event_duration = 2000  # 2 seconds
+        self._event_duration_override_ms: Optional[int] = None
         # Event tasks shown in Tasks tab (created from adversarial events)
         self.event_tasks: List[Dict[str, Any]] = []
         self.event_task_rects: List[Tuple[pygame.Rect, int]] = []  # (rect, event_task_index)
@@ -423,7 +462,7 @@ class VisualGame:
         # Menu navigation
         self.menu_selection = 0  # 0 = New Game, 1 = Options, 2 = Quit
         self.options_selection = 0  # 0 = Difficulty, 1 = Advanced, 2 = Controls, 3 = Back
-        self.advanced_selection = 0  # 0=Algorithm, 1=Turn Speed, 2=Decay, 3=AI Aggro, 4=AI Random, 5=AI Cooldown, 6=Map Size, 7=Back
+        self.advanced_selection = 0  # 0=Algorithm, 1=Turn Speed, 2=Decay, 3=AI Aggro, 4=AI Random, 5=AI Cooldown, 6=Map Size, 7=Dev HUD, 8=Back
         self.difficulty_selection = 1  # 0 = Easy, 1 = Normal, 2 = Hard
         self.algorithm_selection = 0  # 0 = A*, 1 = IDA*, 2 = Beam Search
         self.starting_agents = 2  # 1-5, selected at new game setup
@@ -486,6 +525,8 @@ class VisualGame:
         # Rolling buffers for dev digit cheats (digits only)
         self._dev_wood_cheat_buffer: str = ""
         self._dev_speed_cheat_buffer: str = ""
+        # Developer HUD toggle (advanced runtime stats)
+        self.show_dev_stats: bool = False
 
         # --- Sprites / textures (loaded from assets/) ---
         # Terrain tiles (filenames can be adjusted if yours differ)
@@ -575,6 +616,11 @@ class VisualGame:
         except Exception as e:
             print("Failed to load powerup_speed.png:", e)
             self.img_powerup_speed = None
+        try:
+            self.img_powerup_gills = load_image("powerups", "powerup_gills.png")
+        except Exception as e:
+            print("Failed to load powerup_gills.png:", e)
+            self.img_powerup_gills = None
     
     def _set_world_size(self, size_tiles: int) -> None:
         """Apply a world-size preset by updating module-level world bounds."""
@@ -675,9 +721,9 @@ class VisualGame:
 
     def _snapshot_agent_powerup_carryover(
         self, state: ColonyState, new_agent_count: int
-    ) -> Dict[int, Tuple[float, Set[str]]]:
-        """Per-agent speed and auto-walk powerup types for IDs that are rebuilt on the next floor."""
-        out: Dict[int, Tuple[float, Set[str]]] = {}
+    ) -> Dict[int, Tuple[float, bool, Set[str]]]:
+        """Per-agent persisted perks (speed, gills, auto-walk types) for IDs rebuilt on next floor."""
+        out: Dict[int, Tuple[float, bool, Set[str]]] = {}
         for a in state.agents:
             if a.get("status") == "dead":
                 continue
@@ -685,20 +731,23 @@ class VisualGame:
             if not isinstance(aid, int) or aid < 0 or aid >= new_agent_count:
                 continue
             spd = float(a.get("speed") or 1.0)
+            gills = bool(a.get("gills", False))
             perks = set(self.agent_powerups.get(aid, set()))
-            out[aid] = (spd, perks)
+            out[aid] = (spd, gills, perks)
         return out
 
     def _apply_agent_powerup_carryover(
-        self, state: ColonyState, carry: Dict[int, Tuple[float, Set[str]]]
+        self, state: ColonyState, carry: Dict[int, Tuple[float, bool, Set[str]]]
     ) -> None:
         """Reapply persisted speed and collector powerups after floor-regenerated agents exist."""
-        for aid, (spd, perks) in carry.items():
+        for aid, (spd, gills, perks) in carry.items():
             agent = state.get_agent_by_id(aid)
             if not agent or agent.get("status") == "dead":
                 continue
             if spd > 1.0:
                 agent["speed"] = min(2.25, spd)
+            if gills:
+                agent["gills"] = True
             if perks:
                 self.agent_powerups[aid] = set(perks)
 
@@ -934,7 +983,7 @@ class VisualGame:
         
         self.agent_paths.clear()
         self.agent_visual_pos.clear()
-        engine = GameEngine(initial_state)
+        engine = GameEngine(initial_state, director_use_rl=True)
         self.game = engine
 
         # Multi-floor: world AABB, wood quota, sparse trees (design: harder difficulty → fewer trees).
@@ -1539,14 +1588,18 @@ class VisualGame:
             self.screen.blit(scan_line, (sidebar_x + 10, y_offset))
             y_offset += 14
 
-            pts = float(getattr(state, "director_points", 0.0) or 0.0)
-            inc = director_income_per_turn(state.difficulty, int(getattr(state, "floor_index", 1)))
-            cap = director_budget_cap(state.difficulty)
-            threat = self.font_sidebar_body.render(
-                f"Threat budget: {pts:.1f}/{cap:.0f} (+{inc:.1f}/turn)", True, (185, 140, 210)
-            )
-            self.screen.blit(threat, (sidebar_x + 10, y_offset))
-            y_offset += 14
+            if self.show_dev_stats:
+                hdr = self.font_sidebar_body.render("Dev HUD", True, (160, 180, 210))
+                self.screen.blit(hdr, (sidebar_x + 10, y_offset))
+                y_offset += 14
+                for line in _format_director_debug_lines(state):
+                    surf = self.font_sidebar_body.render(line, True, (185, 140, 210))
+                    self.screen.blit(surf, (sidebar_x + 10, y_offset))
+                    y_offset += 14
+                # Also show last chosen RL action if engine reported it.
+                # (Pulled from state where available; action itself is per-turn summary.)
+                y_offset += 4
+
             wq_raw = float(getattr(state, "wood_quota", 0.0) or 0.0)
             wq = required_wood_for_quota(wq_raw)
             wood_amt = float(state.resources.get("wood", 0.0))
@@ -1830,7 +1883,12 @@ class VisualGame:
             current_time = pygame.time.get_ticks()
             elapsed = current_time - self.event_start_time
 
-            if elapsed < self.event_duration:
+            duration_ms = (
+                int(self._event_duration_override_ms)
+                if self._event_duration_override_ms is not None
+                else int(self.event_duration)
+            )
+            if elapsed < duration_ms:
                 # Center on the gameplay (camera) area, independent of zoom
                 center_x = self.camera_width // 2
                 center_y = self.camera_height // 2
@@ -1883,11 +1941,13 @@ class VisualGame:
                 # Clear event after duration
                 self.current_event_text = None
                 self.event_start_time = None
+                self._event_duration_override_ms = None
     
-    def _show_event(self, event_description: str):
+    def _show_event(self, event_description: str, *, duration_ms: Optional[int] = None):
         """Show an event notification."""
         self.current_event_text = event_description
         self.event_start_time = pygame.time.get_ticks()
+        self._event_duration_override_ms = int(duration_ms) if duration_ms is not None else None
 
     def _event_location_to_world(self, location: Any) -> Optional[Tuple[int, int]]:
         """
@@ -2200,6 +2260,8 @@ class VisualGame:
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_F11:
                     self._toggle_fullscreen()
+                elif event.key == pygame.K_F3:
+                    self.show_dev_stats = not self.show_dev_stats
                 elif event.key == pygame.K_ESCAPE:
                     # Open confirmation overlay instead of instantly quitting
                     self.confirm_quit_selection = 0
@@ -2811,16 +2873,23 @@ class VisualGame:
             event_location = event_info.get("target_station_id") or event_info.get("location", "")
             target_agent_id = event_info.get("target_agent_id")
             if event_type and event_type != "no_adversarial_event":
-                event_desc = f"{event_type.upper()} at {event_location}"
+                pretty = _humanize_event_name(event_type)
+                where = f" at {event_location}" if event_location else ""
+                event_desc = f"{pretty}{where}."
                 if event_type == "station_breakdown":
                     status = specific_effects.get("status")
                     if status == "warning":
-                        event_desc = f"STATION WARNING at {event_location}"
+                        event_desc = f"Station warning at {event_location}. A breakdown is imminent."
                     elif status == "failed":
-                        event_desc = f"STATION BREAKDOWN at {event_location}"
+                        event_desc = f"Station breakdown at {event_location}. Repairs are required."
                 elif isinstance(target_agent_id, int):
-                    event_desc = f"{event_type.upper()} on AGENT {target_agent_id}"
-                self._show_event(event_desc)
+                    # Try to show a name when available.
+                    a = turns_state.get_agent_by_id(int(target_agent_id))
+                    who = a.get("name") if isinstance(a, dict) else None
+                    who_txt = who if who else f"Agent {int(target_agent_id)}"
+                    event_desc = f"{pretty} on {who_txt}. Check their vitals."
+                # Disasters should linger longer than minor UI notifications.
+                self._show_event(event_desc, duration_ms=5200)
                 if event_type == "station_breakdown":
                     self._add_event_task(event_type, event_location)
             
@@ -2929,6 +2998,7 @@ class VisualGame:
         ai_cooldown_text = f"AI Repeat Cooldown: {self.ai_repeat_cooldown} turns"
         map_size_name, map_size_tiles = MAP_SIZE_PRESETS[self.map_size_index]
         map_size_text = f"Map Size: {map_size_name} ({map_size_tiles}x{map_size_tiles})"
+        dev_text = f"Dev HUD: {'On' if self.show_dev_stats else 'Off'}"
         
         options_list = [
             algo_text,
@@ -2938,10 +3008,11 @@ class VisualGame:
             ai_randomness_text,
             ai_cooldown_text,
             map_size_text,
+            dev_text,
             "Back"
         ]
         # Rows that use left/right click to adjust (show split)
-        slider_rows = {1, 2, 3, 4, 5, 6}
+        slider_rows = {1, 2, 3, 4, 5, 6, 7}
         
         y_start = 200
         self.advanced_button_rects = []
@@ -3252,6 +3323,8 @@ class VisualGame:
                 img = self.img_powerup_int
             elif p.powerup_type == POWERUP_SPEED_BOOST and self.img_powerup_speed:
                 img = self.img_powerup_speed
+            elif p.powerup_type == POWERUP_GILLS and getattr(self, "img_powerup_gills", None):
+                img = self.img_powerup_gills
 
             if img is not None:
                 size = max(20, int(ts * 1.05))
@@ -3273,6 +3346,9 @@ class VisualGame:
                 elif p.powerup_type == POWERUP_SPEED_BOOST:
                     color = (120, 220, 120)
                     icon = "S"
+                elif p.powerup_type == POWERUP_GILLS:
+                    color = (80, 190, 255)
+                    icon = "G"
                 else:
                     color = COLOR_STATION_INTEGRITY
                     icon = "R"
@@ -3503,15 +3579,17 @@ class VisualGame:
                                 else:
                                     self.map_size_index = min(len(MAP_SIZE_PRESETS) - 1, self.map_size_index + 1)
                                 self._set_world_size(MAP_SIZE_PRESETS[self.map_size_index][1])
-                            elif i == 7:  # Back
+                            elif i == 7:  # Dev HUD
+                                self.show_dev_stats = not self.show_dev_stats
+                            elif i == 8:  # Back
                                 self.game_state = STATE_OPTIONS
                             break
             
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_UP:
-                    self.advanced_selection = (self.advanced_selection - 1) % 8
+                    self.advanced_selection = (self.advanced_selection - 1) % 9
                 elif event.key == pygame.K_DOWN:
-                    self.advanced_selection = (self.advanced_selection + 1) % 8
+                    self.advanced_selection = (self.advanced_selection + 1) % 9
                 elif event.key == pygame.K_LEFT:
                     if self.advanced_selection == 0:  # Algorithm
                         algorithms = ["astar", "idastar", "beam_search"]
@@ -3534,6 +3612,8 @@ class VisualGame:
                     elif self.advanced_selection == 6:  # Map size
                         self.map_size_index = max(0, self.map_size_index - 1)
                         self._set_world_size(MAP_SIZE_PRESETS[self.map_size_index][1])
+                    elif self.advanced_selection == 7:  # Dev HUD
+                        self.show_dev_stats = not self.show_dev_stats
                 elif event.key == pygame.K_RIGHT:
                     if self.advanced_selection == 0:  # Algorithm
                         algorithms = ["astar", "idastar", "beam_search"]
@@ -3556,8 +3636,12 @@ class VisualGame:
                     elif self.advanced_selection == 6:  # Map size
                         self.map_size_index = min(len(MAP_SIZE_PRESETS) - 1, self.map_size_index + 1)
                         self._set_world_size(MAP_SIZE_PRESETS[self.map_size_index][1])
+                    elif self.advanced_selection == 7:  # Dev HUD
+                        self.show_dev_stats = not self.show_dev_stats
                 elif event.key == pygame.K_RETURN or event.key == pygame.K_SPACE:
-                    if self.advanced_selection == 7:  # Back
+                    if self.advanced_selection == 7:  # Dev HUD
+                        self.show_dev_stats = not self.show_dev_stats
+                    elif self.advanced_selection == 8:  # Back
                         self.game_state = STATE_OPTIONS
                 elif event.key == pygame.K_ESCAPE:
                     self.game_state = STATE_OPTIONS
@@ -3597,6 +3681,8 @@ class VisualGame:
                         else:
                             self.map_size_index = min(len(MAP_SIZE_PRESETS) - 1, self.map_size_index + 1)
                         self._set_world_size(MAP_SIZE_PRESETS[self.map_size_index][1])
+                    elif self.advanced_selection == 7:  # Dev HUD
+                        self.show_dev_stats = not self.show_dev_stats
         
         return True
     
@@ -3627,6 +3713,9 @@ class VisualGame:
                     a2.pop("speed_boost_end_turn", None)
                     a2.pop("speed_boost_mult", None)
                     self._show_event(f"Speed powerup! Permanent move speed ×{new_spd:.2f}")
+                elif p.powerup_type == POWERUP_GILLS:
+                    state.update_agent(idx, {"gills": True}, validate=False)
+                    self._show_event("Gills powerup! This agent moves through water like land.")
                 else:
                     self.agent_powerups.setdefault(agent_id, set()).add(p.powerup_type)
                     powerup_name = {
@@ -3635,6 +3724,14 @@ class VisualGame:
                         POWERUP_AUTO_INTEGRITY: "Auto Integrity",
                     }.get(p.powerup_type, "Auto-walk")
                     self._show_event(f"{powerup_name} powerup collected!")
+
+                # Powerups strengthen the colony; grant the Director extra budget points (dev balancing knob).
+                gain = director_points_gain_for_powerup(p.powerup_type, getattr(state, "difficulty", "normal"))
+                cap = director_budget_cap(getattr(state, "difficulty", "normal"))
+                state.director_points = min(
+                    float(cap),
+                    float(getattr(state, "director_points", 0.0) or 0.0) + float(gain),
+                )
                 break
         self.powerups = [p for p in self.powerups if p not in to_remove]
     

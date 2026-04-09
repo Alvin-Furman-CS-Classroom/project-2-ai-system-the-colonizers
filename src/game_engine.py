@@ -642,6 +642,8 @@ class GameEngine:
         goal: Tuple[int, int],
         exclude_agent_id: Optional[int] = None,
         allow_blocked_goal: bool = True,
+        *,
+        agent_gills: bool = False,
     ) -> List[Tuple[int, int]]:
         """
         A* pathfinding directly on the tile grid.
@@ -767,6 +769,9 @@ class GameEngine:
                     tile_move_speed = float(
                         self.state.get_tile_at(nx_, ny_).get("move_speed", 1.0)
                     )
+                # Gills: treat water (move_speed ~0.2) as normal land for this agent.
+                if agent_gills and tile_move_speed <= 0.21:
+                    tile_move_speed = 1.0
 
                 # Base movement cost (1.0 for cardinal, ~1.414 for diagonal)
                 base_cost = 1.0 if abs(dx) + abs(dy) == 1 else 1.414
@@ -810,11 +815,13 @@ class GameEngine:
         
         # Use grid-based pathfinding (more reliable for arbitrary coordinates)
         # Exclude this agent from occupancy checks so it can pathfind through its own position
+        agent_gills = bool(agent.get("gills", False))
         path_coords = self._grid_pathfind(
             start,
             goal,
             exclude_agent_id=agent_id,
             allow_blocked_goal=True,
+            agent_gills=agent_gills,
         )
         
         # If pathfinding failed, return empty list

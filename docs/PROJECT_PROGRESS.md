@@ -1,5 +1,11 @@
 ## Project Progress Overview
 
+### Docs (Checkpoint Reports)
+
+- Docs index: `docs/README.md`
+- Full-project elegance + module report: `docs/PROJECT_CODE_ELEGANCE_AND_MODULE_REPORT_2026-04-09.md`
+- Checkpoint 5 elegance + module report: `docs/checkpoint_5_CODE_ELEGANCE_AND_MODULE_REPORT_2026-04-09.md`
+
 ### What’s Been Done
 
 - **Core architecture & modules**

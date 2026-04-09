@@ -46,6 +46,23 @@ class TestDirectorBudget(unittest.TestCase):
         eng.run_adversarial_phase()
         self.assertGreater(float(s.director_points), 0.0)
 
+    def test_points_decrease_when_event_purchased(self):
+        eng = self._engine("normal", 1)
+        s = eng.state
+        # Ensure we're well-funded so a costed event is affordable.
+        s.director_points = 10.0
+        s.resources["wood"] = 0.0
+        s.wood_quota = 999.0
+        pts_before = float(s.director_points)
+        ev, summ = eng.run_adversarial_phase()
+        cost = float(getattr(ev, "cost", 0.0) or 0.0)
+        if ev.event_type != "no_adversarial_event" and cost > 0.0:
+            # After accrual then purchase, points must be strictly below the post-accrual amount.
+            post_accrual = min(director_budget_cap(s.difficulty), pts_before + director_income_per_turn(s.difficulty, s.floor_index))
+            self.assertLess(float(s.director_points), float(post_accrual))
+            self.assertAlmostEqual(float(s.director_points), float(post_accrual - cost), places=6)
+        self.assertIn("director_event_cost", summ)
+
     def test_affordability_can_force_no_event(self):
         eng = self._engine("easy", 1)
         s = eng.state

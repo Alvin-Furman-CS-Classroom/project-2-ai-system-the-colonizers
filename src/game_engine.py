@@ -83,22 +83,33 @@ class GameEngine:
         self.rule_engine = RuleEngine()
         self.task_planner = TaskPlanner(self.state)
         self.event_resolver = EventResolver()
-        self.survival_assessor = SurvivalAssessor(use_rl=survival_use_rl)
+        self.survival_assessor = SurvivalAssessor(
+            use_rl=survival_use_rl,
+            persist_path=".rl_cache/survival_q.json",
+        )
         if survival_use_rl:
-            self.survival_assessor.train_q_learning(
-                episodes=survival_train_episodes,
-                max_steps_per_episode=12,
-                epsilon=0.15,
-                seed=42,
-            )
+            # Warm-start: if we have persisted knowledge, keep it; otherwise do offline bootstrap.
+            if not getattr(self.survival_assessor, "_q_agent", None) or not self.survival_assessor._q_agent.q:
+                self.survival_assessor.train_q_learning(
+                    episodes=survival_train_episodes,
+                    max_steps_per_episode=12,
+                    epsilon=0.15,
+                    seed=42,
+                )
 
         # Initialize AI Director with available events
         self.available_events = self._create_default_events()
         self.ai_director = AIDirector(self.available_events)
         self.director_use_rl = bool(director_use_rl)
-        self.budget_rl_director = BudgetRLDirector(seed=42) if self.director_use_rl else None
+        self.budget_rl_director = (
+            BudgetRLDirector(seed=42, persist_path=".rl_cache/director_q.json")
+            if self.director_use_rl
+            else None
+        )
         self._director_prev_state: Optional[ColonyState] = None
         self._director_last_action: Optional[str] = None
+        self._survival_prev_state: Optional[ColonyState] = None
+        self._survival_prev_pressure_action: Optional[str] = None
 
         # Precomputed terrain move_speed grid (invalidated when world/seed/floor/difficulty changes).
         self._terrain_key: Optional[Tuple[Any, ...]] = None
@@ -429,6 +440,20 @@ class GameEngine:
         if selected_event.event_type != NO_ADVERSARY_EVENT.event_type:
             self.state.floor_disasters_count = int(getattr(self.state, "floor_disasters_count", 0)) + 1
 
+        # Capture pre-resolution snapshot for Module 6 online learning.
+        if self.survival_assessor.use_rl:
+            try:
+                self._survival_prev_state = ColonyState(self.state.to_dict())
+            except Exception:
+                self._survival_prev_state = None
+            try:
+                cost = float(getattr(selected_event, "cost", 0.0) or 0.0)
+            except Exception:
+                cost = 0.0
+            self._survival_prev_pressure_action = (
+                "harsh" if cost >= 6.0 else "normal" if cost >= 2.0 else "mild"
+            )
+
         # Phase 4: Resolution - Resource Consumption & Event Application (Modules 1 & 5)
         resolution_result = self.run_resolution_phase(selected_event)
         turn_report["phases"]["resolution"] = resolution_result
@@ -452,6 +477,23 @@ class GameEngine:
                 pass
         self._director_prev_state = None
         self._director_last_action = None
+
+        # Module 6: online RL update from the realized transition.
+        if (
+            self.survival_assessor.use_rl
+            and self._survival_prev_state is not None
+            and self._survival_prev_pressure_action is not None
+        ):
+            try:
+                self.survival_assessor.update_from_real_turn(
+                    self._survival_prev_state,
+                    self._survival_prev_pressure_action,
+                    self.state,
+                )
+            except Exception:
+                pass
+        self._survival_prev_state = None
+        self._survival_prev_pressure_action = None
 
         # Survival Assessment (Module 6)
         survival_assessment = self.survival_assessor.assess_survival(self.state)

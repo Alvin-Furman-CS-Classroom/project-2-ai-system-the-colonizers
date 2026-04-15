@@ -11,10 +11,12 @@ set of abstract "environment pressure" levels used for training simulation.
 from __future__ import annotations
 
 import copy
+import json
 import math
+import os
 import random
 from collections import defaultdict
-from typing import Callable, Dict, Iterable, Tuple
+from typing import Any, Callable, Dict, Iterable, Tuple
 
 from src.module1_state.colony_state import ColonyState
 
@@ -178,6 +180,62 @@ class TabularQAgent:
     def max_value_state(self, state_id: int) -> float:
         """max_a Q(s,a); 0 if unseen."""
         return self.max_over_actions(state_id)
+
+    def to_jsonable(self) -> Dict[str, Any]:
+        """
+        Return a JSON-serializable snapshot of this agent's Q-table.
+        Keys are converted to strings for JSON compatibility.
+        """
+        q_out: Dict[str, Dict[str, float]] = {}
+        for sid, row in self.q.items():
+            q_out[str(int(sid))] = {str(a): float(v) for a, v in (row or {}).items()}
+        return {
+            "version": 1,
+            "actions": list(self.actions),
+            "alpha": float(self.alpha),
+            "gamma": float(self.gamma),
+            "q": q_out,
+        }
+
+    def load_jsonable(self, payload: Dict[str, Any], *, merge: bool = True) -> None:
+        """
+        Load Q-table from a JSONable dict created by to_jsonable.
+        If merge=True, merges into existing table; otherwise replaces.
+        """
+        if not isinstance(payload, dict):
+            return
+        q_in = payload.get("q")
+        if not isinstance(q_in, dict):
+            return
+        if not merge:
+            self.q = defaultdict(dict)
+        for sid_s, row in q_in.items():
+            try:
+                sid = int(sid_s)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(row, dict):
+                continue
+            dst = self.q[sid]
+            for a, v in row.items():
+                try:
+                    dst[str(a)] = float(v)
+                except (TypeError, ValueError):
+                    continue
+
+    def save_json(self, path: str) -> None:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_jsonable(), f, indent=2, sort_keys=True)
+
+    def try_load_json(self, path: str, *, merge: bool = True) -> bool:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            self.load_jsonable(payload, merge=merge)
+            return True
+        except Exception:
+            return False
 
 
 def survival_probability_from_max_q(max_q: float) -> float:

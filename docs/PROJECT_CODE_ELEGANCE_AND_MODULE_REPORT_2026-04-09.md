@@ -10,7 +10,7 @@
 
 This document is a project-wide, module-by-module report covering **all six course topics** implemented in the system, with an emphasis on **code elegance**, **clear inputs/outputs**, and **test evidence**.
 
-**Test evidence:** `python run_tests.py` → **116 tests, 0 failures** (run on Apr 9, 2026).
+**Test evidence:** `python run_tests.py` → **118 tests, 0 failures** (run on Apr 15, 2026).
 
 ---
 
@@ -137,6 +137,7 @@ This document is a project-wide, module-by-module report covering **all six cour
 ### Responsibilities
 
 - Produces survival/risk assessment for the colony and provides RL-ready discretization and learning hooks.
+- Provides **persistent** tabular policies (saved/loaded) so learning occurs across floors and across runs.
 
 ### Inputs / Outputs
 
@@ -147,6 +148,15 @@ This document is a project-wide, module-by-module report covering **all six cour
 
 - RL components are bounded and readable (tabular Q-learning with discretization).
 - Heuristic fallback keeps the system interpretable and robust.
+
+### RL defense (why this qualifies as reinforcement learning)
+
+- **Policy representation**: tabular \(Q(s,a)\) over a discrete state space derived from the game’s real state object.
+- **Experience**: the engine produces real transitions \((s,a,r,s')\) during play; both the survival assessor and the disaster-purchasing Director update their Q-tables online.
+- **Objective**:
+  - Survival assessor learns value under realized pressure (used as a bounded survival estimate with safety caps).
+  - Director learns which disaster “purchases” are most effective against the colony given budget constraints and observed outcomes.
+- **Persistence**: learned tables are stored in `.rl_cache/*.json`, so the system improves floor-to-floor and run-to-run rather than resetting each session.
 
 ---
 

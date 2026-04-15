@@ -14,7 +14,7 @@ Checkpoint 3 is in a strong state for submission. Module 4 and Module 5 are now 
 ## Rubric Scores (Part 1: Source Code Review)
 
 - **1.1 Functionality (8 pts): 8 / 8**  
-  - Full automated suite passes: `python run_tests.py` -> **116 tests, 0 failures** (as of 2026-04-09).  
+  - Full automated suite passes: `python run_tests.py` -> **118 tests, 0 failures** (as of 2026-04-15).  
   - Module 4 and 5 behavior is covered by unit tests and integrated into turn execution via `GameEngine`.
 
 - **1.2 Code Elegance and Quality (7 pts): 7 / 7**  
@@ -58,7 +58,7 @@ None identified.
 ## Action Items
 
 - [x] Keep Module 4 and 5 contracts explicit via `Event` and phase orchestration.  
-- [x] Keep automated validation green (`python run_tests.py` is currently **116/116** as of 2026-04-09).  
+- [x] Keep automated validation green (`python run_tests.py` is currently **118/118** as of 2026-04-15).  
 - [x] Document checkpoint-3 evidence and scope in dedicated `docs/` files.  
 - [x] Add checkpoint-3 demo support notes (`docs/checkpoint_3_DEMO_SCRIPT_2026-03-19.md`).
 

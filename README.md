@@ -151,11 +151,11 @@ python -m unittest discover -v
 
 | Checkpoint | Date | Modules Included | Status | Evidence |
 | ---------- | ---- | ---------------- | ------ | -------- |
-| 1 | Feb 11 | Module 1 (State), Module 2 (Search), Module 3 (Logic) | Ready | `docs/checkpoint_1_elegance_report.md`; `python run_tests.py` (116/116 as of 2026-04-09) |
-| 2 | Feb 26 | Module 2 (Search), Module 3 (Logic) | Ready | `docs/checkpoint_2_CODE_ELEGANCE_REPORT_2026-02-26.md`; `python run_tests.py` (116/116 as of 2026-04-09) |
-| 3 | March 19 | Module 4 (Game Theory), Module 5 (Events) | Ready | `docs/checkpoint_3_CODE_ELEGANCE_REPORT_2026-03-19.md`; `docs/checkpoint_3_SUBMISSION_NOTES_2026-03-19.md`; `docs/checkpoint_3_DEMO_SCRIPT_2026-03-19.md`; `python run_tests.py` (116/116 as of 2026-04-09) |
-| 4 | April 2 | Module 5 (Events), Module 6 (RL/Heuristics) | Ready | `docs/checkpoint_4_CODE_ELEGANCE_REPORT_2026-04-02.md`; `python run_tests.py` (116/116 as of 2026-04-09) |
-| 5 | April 16 | Module 6 (RL/Heuristics) | Ready | `docs/checkpoint_5_CODE_ELEGANCE_AND_MODULE_REPORT_2026-04-09.md`; `python run_tests.py` (116/116 as of 2026-04-09) |
+| 1 | Feb 11 | Module 1 (State), Module 2 (Search), Module 3 (Logic) | Ready | `docs/checkpoint_1_elegance_report.md`; `python run_tests.py` (118/118 as of 2026-04-15) |
+| 2 | Feb 26 | Module 2 (Search), Module 3 (Logic) | Ready | `docs/checkpoint_2_CODE_ELEGANCE_REPORT_2026-02-26.md`; `python run_tests.py` (118/118 as of 2026-04-15) |
+| 3 | March 19 | Module 4 (Game Theory), Module 5 (Events) | Ready | `docs/checkpoint_3_CODE_ELEGANCE_REPORT_2026-03-19.md`; `docs/checkpoint_3_SUBMISSION_NOTES_2026-03-19.md`; `docs/checkpoint_3_DEMO_SCRIPT_2026-03-19.md`; `python run_tests.py` (118/118 as of 2026-04-15) |
+| 4 | April 2 | Module 5 (Events), Module 6 (RL/Heuristics) | Ready | `docs/checkpoint_4_CODE_ELEGANCE_REPORT_2026-04-02.md`; `python run_tests.py` (118/118 as of 2026-04-15) |
+| 5 | April 16 | Module 6 (RL/Heuristics) | Ready | `docs/checkpoint_5_CODE_ELEGANCE_AND_MODULE_REPORT_2026-04-09.md`; `python run_tests.py` (118/118 as of 2026-04-15) |
 
 ### Docs
 

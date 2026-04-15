@@ -16,6 +16,8 @@ to live turns via discretize_colony_state.
 from __future__ import annotations
 
 import random
+import copy
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 from src.module1_state.colony_state import ColonyState
@@ -37,15 +39,19 @@ class SurvivalAssessor:
     use_rl=True: values from tabular Q after offline training; unseen states fall back to heuristics.
     """
 
-    def __init__(self, use_rl: bool = False):
+    def __init__(self, use_rl: bool = False, *, persist_path: Optional[str] = None):
         self.use_rl = bool(use_rl)
         self.heuristic_weights = self._initialize_heuristic_weights()
         self.learning_rate = 0.1
         self.discount_factor = 0.95
+        self.persist_path = persist_path
         self._q_agent = TabularQAgent(
             learning_rate=self.learning_rate,
             discount_factor=self.discount_factor,
         )
+        if self.persist_path:
+            # Best-effort load; never block gameplay on persistence.
+            self._q_agent.try_load_json(self.persist_path, merge=True)
 
     def _initialize_heuristic_weights(self) -> Dict[str, float]:
         return {
@@ -193,6 +199,7 @@ class SurvivalAssessor:
             seed=seed,
             start_state_factory=start_state_factory,
         )
+        self._persist_if_configured()
 
     def _default_training_start_state(self, rng: random.Random) -> ColonyState:
         """Random but plausible colonies for exploration."""
@@ -238,3 +245,28 @@ class SurvivalAssessor:
         s_next_id = discretize_colony_state(next_state)
         terminal = colony_is_terminal(next_state)
         self._q_agent.q_learning_step(sid, action, reward, s_next_id, terminal=terminal)
+        self._persist_if_configured()
+
+    def update_from_real_turn(
+        self, prev_state: ColonyState, pressure_action: str, next_state: ColonyState
+    ) -> None:
+        """
+        Online learning hook using a real game transition (floor-to-floor and run-to-run).
+
+        The "action" is an abstract pressure label ("mild"|"normal"|"harsh") derived from
+        realized adversity intensity; reward is +1 for surviving the step, else -10.
+        """
+        # Copy to avoid surprises if caller passes references that mutate later.
+        s = ColonyState(copy.deepcopy(prev_state.to_dict()))
+        s2 = ColonyState(copy.deepcopy(next_state.to_dict()))
+        r = -10.0 if colony_is_terminal(s2) else 1.0
+        self.update_rl(s, pressure_action, r, s2)
+
+    def _persist_if_configured(self) -> None:
+        if not self.persist_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.persist_path) or ".", exist_ok=True)
+            self._q_agent.save_json(self.persist_path)
+        except Exception:
+            pass

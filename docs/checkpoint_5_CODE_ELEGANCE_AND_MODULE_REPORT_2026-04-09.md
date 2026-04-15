@@ -10,7 +10,7 @@
 
 Checkpoint 5 is submission-ready from a code elegance and module-integration standpoint. The project has a stable multi-floor gameplay loop, a budgeted adversarial Director that can optionally use tabular reinforcement learning to bias disaster purchases, and a Pygame visual client used for demonstrations. Module boundaries remain clear (state ↔ search ↔ logic ↔ adversary ↔ event resolution ↔ assessment), while the engine coordinates the end-to-end turn cycle.
 
-**Test evidence:** `python run_tests.py` → **116 tests, 0 failures** (run on Apr 9, 2026).
+**Test evidence:** `python run_tests.py` → **118 tests, 0 failures** (run on Apr 15, 2026).
 
 ---
 
@@ -19,6 +19,24 @@ Checkpoint 5 is submission-ready from a code elegance and module-integration sta
 ### Purpose
 
 Provide an assessment signal over a `ColonyState` (survival probability, risk factors, time-to-failure estimate) and expose an RL-ready interface used by the engine and/or Director.
+
+### What makes this “real RL” (clear defense)
+
+Module 6 uses **standard tabular Q-learning** with an explicit MDP formulation:
+
+- **State (\(s\))**: a discretized summary of `ColonyState` (resource buckets, living-agent bucket, floor bucket, and carryover stress bin). See `discretize_colony_state` in `src/module6_rl/q_learning.py`.
+- **Action (\(a\))**: an abstract adversity/pressure label (`"mild" | "normal" | "harsh"`). In the live game loop, this is derived from realized adversity intensity (e.g., the Director event cost tier).
+- **Reward (\(r\))**: survival-shaped reward (+1 for surviving a step, -10 on terminal failure).
+- **Update rule**: \(Q(s,a) \leftarrow Q(s,a) + \alpha [r + \gamma \max_{a'} Q(s',a') - Q(s,a)]\) implemented in `TabularQAgent.q_learning_step`.
+
+### Floor-to-floor and run-to-run learning (persistence)
+
+The learning is **not reset each new game**. The Q-table is persisted to disk and reloaded on startup:
+
+- Survival assessor policy: `.rl_cache/survival_q.json`
+- Director policy (disaster purchasing RL): `.rl_cache/director_q.json`
+
+Policies are updated online during play and persisted when floors advance (best-effort, never blocking gameplay).
 
 ### Inputs / Outputs
 
@@ -101,6 +119,6 @@ The project includes a stable notion of advancing floors (regenerating the map w
 ## Checklist (submission readiness)
 
 - [x] Checkpoint 5 report present in `docs/` and linked from `docs/README.md`
-- [x] Full test suite passes (`116/116`)
+- [x] Full test suite passes (`118/118`)
 - [x] Clear module IO and integration story documented
 

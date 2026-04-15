@@ -9,7 +9,9 @@ constraints; the core engine still applies the purchased event via EventResolver
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+import json
+import os
+from typing import Any, Dict, List, Optional, Tuple
 import random
 
 from src.module1_state.colony_state import ColonyState
@@ -119,6 +121,53 @@ class TabularDirectorQ:
         old = float(row.get(a, 0.0))
         row[a] = old + self.learning_rate * (r + self.discount_factor * max_next - old)
 
+    def to_jsonable(self) -> Dict[str, Any]:
+        q_out: Dict[str, Dict[str, float]] = {}
+        for sid, row in (self.q or {}).items():
+            q_out[str(int(sid))] = {str(a): float(v) for a, v in (row or {}).items()}
+        return {
+            "version": 1,
+            "learning_rate": float(self.learning_rate),
+            "discount_factor": float(self.discount_factor),
+            "q": q_out,
+        }
+
+    def load_jsonable(self, payload: Dict[str, Any], *, merge: bool = True) -> None:
+        if not isinstance(payload, dict):
+            return
+        q_in = payload.get("q")
+        if not isinstance(q_in, dict):
+            return
+        if self.q is None or not merge:
+            self.q = {}
+        for sid_s, row in q_in.items():
+            try:
+                sid = int(sid_s)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(row, dict):
+                continue
+            dst = self._ensure(sid)
+            for a, v in row.items():
+                try:
+                    dst[str(a)] = float(v)
+                except (TypeError, ValueError):
+                    continue
+
+    def save_json(self, path: str) -> None:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_jsonable(), f, indent=2, sort_keys=True)
+
+    def try_load_json(self, path: str, *, merge: bool = True) -> bool:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            self.load_jsonable(payload, merge=merge)
+            return True
+        except Exception:
+            return False
+
 
 def reward_from_event_effects(resolution_report: Dict[str, object]) -> float:
     """
@@ -160,10 +209,19 @@ class BudgetRLDirector:
     Wraps an existing candidate generator by selecting which "kind" to buy via Q-learning.
     """
 
-    def __init__(self, *, epsilon: float = 0.05, seed: int = 42):
+    def __init__(
+        self,
+        *,
+        epsilon: float = 0.05,
+        seed: int = 42,
+        persist_path: Optional[str] = None,
+    ):
         self.epsilon = float(epsilon)
         self.rng = random.Random(int(seed))
         self.q = TabularDirectorQ()
+        self.persist_path = persist_path
+        if self.persist_path:
+            self.q.try_load_json(self.persist_path, merge=True)
 
     def _allowed_actions(self, state: ColonyState, affordable_points: float) -> List[Action]:
         # Always allow save.
@@ -208,4 +266,13 @@ class BudgetRLDirector:
         s = discretize_director_state(prev_state)
         s2 = discretize_director_state(next_state)
         self.q.update(s, action, r, s2)
+        self._persist_if_configured()
+
+    def _persist_if_configured(self) -> None:
+        if not self.persist_path:
+            return
+        try:
+            self.q.save_json(self.persist_path)
+        except Exception:
+            pass
 

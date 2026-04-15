@@ -1050,6 +1050,18 @@ class VisualGame:
             getattr(state, "director_aggression_bonus", 0.0) + knobs["director_aggression_delta"]
         )
 
+        # Persist learned policies across floors (best-effort; never block gameplay).
+        try:
+            if getattr(self.game, "budget_rl_director", None) and getattr(self.game.budget_rl_director, "persist_path", None):
+                self.game.budget_rl_director._persist_if_configured()
+        except Exception:
+            pass
+        try:
+            if getattr(self.game, "survival_assessor", None):
+                self.game.survival_assessor._persist_if_configured()
+        except Exception:
+            pass
+
         # Parity with _create_initial_game: engine pathfinding / terrain grid use state.world_*.
         state.world_min_x = WORLD_MIN_X
         state.world_max_x = WORLD_MAX_X

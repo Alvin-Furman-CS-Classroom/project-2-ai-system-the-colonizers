@@ -492,7 +492,8 @@ class VisualGame:
         self.advanced_selection = 0  # 0=Algorithm, 1=Turn Speed, 2=Decay, 3=AI Aggro, 4=AI Random, 5=AI Cooldown, 6=Map Size, 7=Dev HUD, 8=Back
         self.difficulty_selection = 1  # 0 = Easy, 1 = Normal, 2 = Hard
         self.algorithm_selection = 0  # 0 = A*, 1 = IDA*, 2 = Beam Search
-        self.starting_agents = 2  # 1-5, selected at new game setup
+        # Starting agents (new game setup). Minimum increases with difficulty; max stays 5.
+        self.starting_agents = self._starting_agents_min_for_difficulty(self.difficulty)
         
         # Decay rate multipliers (1.0 = default, higher = faster decay)
         self.decay_multiplier = 1.0  # Multiplier for decay rates
@@ -967,7 +968,7 @@ class VisualGame:
         # Spread initial agents around center
         start_positions = [(0, 0), (5, 5), (-5, 5), (-5, -5), (5, -5)]
         
-        count = min(max(1, self.starting_agents), 5)
+        count = self._clamp_starting_agents_for_difficulty(self.starting_agents)
         agents_data = []
         for i in range(count):
             x, y = start_positions[i % len(start_positions)]
@@ -1112,7 +1113,7 @@ class VisualGame:
         if self.game:
             self.game.invalidate_terrain_cache()
         names = COLONIST_NAMES
-        count = min(max(1, self.starting_agents), 5)
+        count = self._clamp_starting_agents_for_difficulty(self.starting_agents)
         persist_map_powerups = list(self.powerups)
         carry_agent_powerups = self._snapshot_agent_powerup_carryover(state, count)
         state.agents.clear()
@@ -1190,6 +1191,20 @@ class VisualGame:
         }
         return presets.get(difficulty, presets["normal"])
 
+    def _starting_agents_min_for_difficulty(self, difficulty: str) -> int:
+        d = (difficulty or "normal").lower()
+        # Easy < Normal/Medium < Hard
+        return int({"easy": 2, "normal": 3, "hard": 4}.get(d, 3))
+
+    def _clamp_starting_agents_for_difficulty(self, value: Any) -> int:
+        """Clamp starting agents to [min_for_difficulty, 5]."""
+        try:
+            v = int(value)
+        except Exception:
+            v = self._starting_agents_min_for_difficulty(self.difficulty)
+        lo = self._starting_agents_min_for_difficulty(self.difficulty)
+        return max(lo, min(5, v))
+
     def _apply_ai_settings_to_engine(self) -> None:
         """Push current AI tuning values into the running GameEngine (if any)."""
         if not self.game:
@@ -1210,6 +1225,7 @@ class VisualGame:
         self.ai_aggression = float(defaults["ai_aggression"])
         self.ai_randomness = float(defaults["ai_randomness"])
         self.ai_repeat_cooldown = int(defaults["ai_repeat_cooldown"])
+        self.starting_agents = self._clamp_starting_agents_for_difficulty(self.starting_agents)
         self._apply_ai_settings_to_engine()
 
     def _sync_stations_to_state(self, state: ColonyState) -> None:
@@ -3387,7 +3403,10 @@ class VisualGame:
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mouse_pos = pygame.mouse.get_pos()
                 if hasattr(self, 'setup_left_rect') and self.setup_left_rect.collidepoint(mouse_pos):
-                    self.starting_agents = max(1, self.starting_agents - 1)
+                    self.starting_agents = max(
+                        self._starting_agents_min_for_difficulty(self.difficulty),
+                        self.starting_agents - 1,
+                    )
                 elif hasattr(self, 'setup_right_rect') and self.setup_right_rect.collidepoint(mouse_pos):
                     self.starting_agents = min(5, self.starting_agents + 1)
                 elif hasattr(self, 'setup_start_rect') and self.setup_start_rect.collidepoint(mouse_pos):
@@ -3398,7 +3417,10 @@ class VisualGame:
                     self.game_state = STATE_MENU
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_LEFT:
-                    self.starting_agents = max(1, self.starting_agents - 1)
+                    self.starting_agents = max(
+                        self._starting_agents_min_for_difficulty(self.difficulty),
+                        self.starting_agents - 1,
+                    )
                 elif event.key == pygame.K_RIGHT:
                     self.starting_agents = min(5, self.starting_agents + 1)
                 elif event.key == pygame.K_RETURN or event.key == pygame.K_SPACE:

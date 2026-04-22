@@ -880,25 +880,36 @@ class VisualGame:
         self._show_event("Dev: colony wood topped up")
 
     def _apply_dev_speed_powerups_cheat(self) -> None:
-        """Place N speed-boost powerups on passable tiles (same pickup type as map spawns)."""
+        """Place one of each powerup type on passable tiles (dev cheat)."""
         if not self.game:
             return
         state = self.game.state
         rng = random.Random(
             int(state.world_seed) + int(state.turn_number) * 997 + 23260
         )
-        n_spawn = 5
+        types = [
+            POWERUP_AUTO_OXYGEN,
+            POWERUP_AUTO_CALORIES,
+            POWERUP_AUTO_INTEGRITY,
+            POWERUP_SPEED_BOOST,
+            POWERUP_GILLS,
+        ]
         added = 0
-        for _ in range(n_spawn * 32):
-            if added >= n_spawn:
+        for typ in types:
+            placed = False
+            for _ in range(64):
+                occupied = self._powerup_occupied_cells(state)
+                xy = self._sample_powerup_tile(state, rng, occupied)
+                if not xy:
+                    break
+                self.powerups.append(Powerup(xy[0], xy[1], typ))
+                added += 1
+                placed = True
                 break
-            occupied = self._powerup_occupied_cells(state)
-            xy = self._sample_powerup_tile(state, rng, occupied)
-            if not xy:
+            if not placed:
+                # If we can't find a free passable tile for a given type, stop early.
                 break
-            self.powerups.append(Powerup(xy[0], xy[1], POWERUP_SPEED_BOOST))
-            added += 1
-        self._show_event(f"Dev: placed {added} speed powerup(s) on the map")
+        self._show_event(f"Dev: placed {added}/{len(types)} powerup(s) (one of each type)")
 
     def _ensure_viewport_trees_turn(self) -> None:
         """Once per turn: guarantee K trees in the current camera view (see VIEWPORT_TREES_K)."""

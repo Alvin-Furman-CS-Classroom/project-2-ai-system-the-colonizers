@@ -6,234 +6,88 @@
 ---
 
 ## Abstract
-The Colony Manager is a turn-based survival simulation that combines cooperative planning with adversarial AI pressure. The player manages colonists whose survival depends on oxygen, calories, and integrity, while an AI Director selects disruptive events designed to exploit colony weaknesses. Our final system integrates six course-aligned modules into one executable pipeline: state representation, search, propositional logic, game theory, event application logic, and reinforcement learning/heuristics. A shared `ColonyState` object serves as the canonical world model, and `GameEngine` executes a deterministic turn cycle: Logic, Planning, Adversarial Selection, Resolution, and Assessment. Search planning supports A*, IDA*, and Beam Search. Rule evaluation enforces survival constraints and applies consequences. The Director uses adversarial evaluation with budget and cooldown constraints for fairness. Event resolution applies state transitions through centralized handlers, and a survival assessor outputs risk estimates with tabular Q-learning support and persistent policy caches.  
-Evaluation focused on correctness and integration. Unit and integration tests, deterministic seeds, and checkpoint demonstrations were used to validate behavior and claims. Repository evidence reports a full passing suite (`118/118`) at the final checkpoint stage. The system’s strongest outcomes are module coherence, reproducibility, and evidence-backed implementation quality. Main limitations include coarse RL discretization and growing UI orchestration complexity in the visual client. Overall, the project demonstrates a technically consistent, modular AI system that meets project requirements and supports realistic future extension.
+The Colony Manager is a turn-based real-time strategy game that combines cooperative planning with adversarial AI pressure. The player manages colonists whose survival depends on oxygen, calories, and integrity, while an AI Director selects disruptive events designed to exploit colony weaknesses. At runtime, the game moves through a consistent turn cycle where the colony state is passed from phase to phase and updated after each decision. Colony information is represented in a JSON-compatible state structure, allowing player actions, rule checks, planning outcomes, and disaster effects to be tracked in one shared model. Within this loop, search methods (A*, IDA*, and Beam Search) support movement, logical rules enforce survival constraints, adversarial selection pressures weak points with budget/cooldown limits, and event resolution applies concrete state transitions. A survival assessor then estimates risk using heuristic scoring with tabular Q-learning support and persistent policy caches.
+To evaluate the final system, we focused on whether behavior remained correct and coherent when all components interacted in sequence. We used deterministic seeded scenarios, automated tests, and checkpoint demonstrations to validate implementation claims and observe failure behavior under pressure. Results showed strong consistency in data flow and module interaction, especially in state transitions and adversarial-response loops. The most important strengths are clear architecture boundaries and reliable pipeline integration, followed by reproducibility across seeded runs. Key limitations are the coarse granularity of tabular RL and growing UI orchestration complexity in the visual client. Overall, the project delivers a technically grounded AI survival system with realistic extension paths.
 
 ## 1. Introduction
-Survival simulation is a strong setting for applied AI because it naturally combines optimization, symbolic constraints, adversarial decision-making, and uncertainty. The Colony Manager was designed as a systems project rather than a single-algorithm exercise: each module maps to a course topic, and all modules are integrated into one turn-based pipeline that can be tested and demonstrated.
+The Colony Manager is built around a simple gameplay tension: the colony must keep critical resources stable while an adversarial Director continually creates new pressure. Oxygen, calories, and integrity are always at risk, so each turn forces trade-offs between movement, repairs, and immediate survival. If those trade-offs are handled poorly, agents die, station performance drops, and recovery becomes increasingly difficult.
 
-The core problem is resource survival under pressure. Each turn, the player must allocate limited attention and movement to keep resources stable and complete tasks while the Director AI introduces disruptions. If pressures accumulate without effective response, agents die, station performance degrades, and colony stability collapses. This dynamic creates meaningful interactions among planning, constraints, and adversarial strategy.
+To support this loop, the project treats the colony as one JSON-compatible state that moves through a fixed sequence of phases each turn. Player actions, planner outputs, rule checks, and disaster effects all update the same shared state, which makes behavior easier to track and reason about. This lets planning, logic, adversarial selection, and event resolution interact as one system rather than as isolated algorithm demos.
 
-The project scope includes:
-- A validated world model for agents, tasks, resources, stations, and map metadata.
-- Path planning and task planning with configurable search algorithms.
-- Rule-based survival checks with deterministic consequence application.
-- Adversarial event selection driven by colony vulnerability.
-- Centralized event-application logic to mutate state safely.
-- Survival assessment and learning hooks through heuristics and tabular RL.
-- Test suite and visual demonstration support.
-
-The system intentionally does not claim deep reinforcement learning or complete game-balance optimization. Instead, it prioritizes correctness, integration clarity, and evidence-backed reporting. This design choice aligns with course requirements emphasizing modular architecture, explainability, and evaluation quality.
+The implementation focuses on technical coherence and evidence-backed behavior. Search methods drive movement and planning decisions, logical constraints enforce survival rules, adversarial selection targets weak points under practical limits, and a survival assessor estimates risk with heuristic and tabular learning support. The goal is not to claim perfect optimization or deep-RL performance, but to deliver a reliable integrated strategy system that can be tested, demonstrated, and extended.
 
 ## 2. System Architecture
-The architecture is organized around one canonical state object (`ColonyState`) and one orchestration layer (`GameEngine`). Every module consumes, evaluates, or mutates the same state model through explicit interfaces. This avoids hidden shared logic and supports both unit-level and pipeline-level testing.
+At a high level, The Colony Manager is organized as a turn-based AI system where player input, world state, and adversarial pressure are processed through one shared simulation loop. The full system includes a state layer, six AI modules, turn coordination logic, and a visual gameplay interface. Rather than splitting game logic across unrelated data stores, the design keeps one structured colony state as the source of truth for resources, agent status, tasks, and infrastructure condition.
 
-### 2.1 High-Level Structure
-- **State core (Module 1):** owns authoritative simulation data.
-- **Reasoning and planning modules (Modules 2-4):** compute movement, rule outcomes, and adversarial choices.
-- **Transition module (Module 5):** applies event effects.
-- **Assessment module (Module 6):** summarizes survival outlook and supports adaptation.
-- **Orchestration layer (`GameEngine`):** executes the fixed turn cycle and returns structured reports.
-- **Presentation layer (`visual_game.py`):** demonstrates runtime behavior with UI controls and render state.
+Modules interact in a strict dependency order so each stage receives valid inputs from the previous stage. The state representation stage provides the current snapshot, the rule layer evaluates constraints and applies immediate consequences, and the planning/search layer computes movement and task decisions using that updated state. The AI Director then performs adversarial selection based on weaknesses and constraints, the event-resolution stage applies disruption effects, and the survival-assessment stage evaluates risk from the resulting condition. This ordering is intentional: constraint enforcement happens before planning, disruption selection happens before resolution, and assessment happens after state mutation.
 
-### 2.2 Turn Pipeline and Data Flow
-Each turn follows:
-1. **Logic:** enforce survival constraints and apply consequences.
-2. **Planning:** produce routes/task choices for agents.
-3. **Adversarial:** select event subject to difficulty, budget, and cooldown.
-4. **Resolution:** apply selected event and update affected state fields.
-5. **Assessment:** compute survival probability/risk indicators and optionally update learned values.
+Data flows through the pipeline as a repeated read-update-pass cycle. Each phase reads the current colony state, computes outputs for its own responsibility, writes state changes or phase outputs, and passes the updated result to the next phase in turn. Figure 1 illustrates this turn-cycle progression from initial state, through rule evaluation, planning, adversarial selection, and event resolution, to post-turn risk assessment and next-turn state. This structure creates a traceable chain of evidence for each turn, making it possible to explain exactly why colony values changed and to validate behavior with unit tests, integration tests, and demo observations.
 
-The output of one phase becomes input for the next phase. Because phase order is deterministic and reports are structured, errors are easier to localize and behavior is reproducible under seeded conditions.
-
-### 2.3 Architecture Artifact Placeholder
+### 2.1 Architecture Artifact Placeholder
 **[Figure 1 Placeholder: End-to-end architecture diagram]**  
-Include module boxes (`module1_state` ... `module6_rl`), `GameEngine`, and arrows showing data flow through the five turn phases. The figure should explicitly mark persistent RL cache files (`.rl_cache/survival_q.json`, `.rl_cache/director_q.json`).
+Include boxes for state representation, rule enforcement, planning/search, AI Director, event resolution, and survival assessment, with arrows showing turn-cycle data flow. The figure should also show persistent policy cache storage used by the learning components.
 
 ## 3. Module Implementation Summary
 This section summarizes each module by purpose, inputs/outputs, and key design choices.
 
 ### 3.1 Module 1: State Representation (`src/module1_state`)
-**Purpose:** Provide the canonical simulation model.  
-**Inputs:** Prior state, updates to agents/tasks/resources/stations.  
-**Outputs:** Validated updated state and serialization forms.  
-**Design choices:**
-- `ColonyState` centralizes model ownership and mutation methods.
-- Validation rejects duplicate IDs, illegal collisions, and invalid references.
-- Serialization/deserialization supports deterministic reload and test scenarios.
-- Seeded world data supports reproducible procedural behavior.
-**Integration dependencies:** foundational dependency for all modules.
+The purpose of Module 1 is to represent the colony as one authoritative state model that all other parts of the system can trust. Its inputs are the prior turn state plus updates to agents, tasks, resources, and station/infrastructure fields, and its outputs are a validated updated state in memory and JSON-compatible serialization for persistence and reload. In practice, this module keeps one shared state representation with strict validation and explicit serialization, so the rest of the pipeline can rely on consistent data. Integration-wise, this module is the core dependency for the entire pipeline because every downstream module reads from or writes to the state it defines.
 
 ### 3.2 Module 2: Search (`src/module2_search`)
-**Purpose:** Compute navigation/task plans for agent execution.  
-**Inputs:** State topology, tasks, agent locations/capabilities.  
-**Outputs:** Planned routes, travel costs, assignment decisions.  
-**Design choices:**
-- Multiple algorithms (A*, IDA*, Beam Search) behind a shared planner API.
-- Search helpers abstract common graph and heuristic logic.
-- Runtime algorithm switching supports comparative testing and gameplay options.
-**Integration dependencies:** consumes module 1 state; affects movement execution and response timing.
+The purpose of Module 2 is to compute movement and task-planning decisions for agents. It takes as input the current map/state topology, active tasks, and agent locations or capabilities, and it outputs route plans, travel costs, and assignment decisions used in turn execution. The main implementation choice here is a single planning interface that supports A*, IDA*, and Beam Search, with shared helper logic to keep behavior consistent across algorithms. Integration dependencies are direct: Module 2 consumes state from Module 1 and its outputs influence later stages by shaping which tasks complete first and how exposed the colony is when the AI Director selects disruptions.
 
 ### 3.3 Module 3: Propositional Logic (`src/module3_logic`)
-**Purpose:** Enforce rule-based survival constraints.  
-**Inputs:** Current `ColonyState`.  
-**Outputs:** Violation reports and deterministic consequences.  
-**Design choices:**
-- Explicit rule definitions keep behavior explainable.
-- Consequence application is separated from detection for testability.
-- Multi-agent edge cases are validated through tests.
-**Integration dependencies:** should run before planning/adversarial phases so downstream modules operate on valid logical state.
+The purpose of Module 3 is to enforce survival constraints through rule-based logic before the rest of the turn proceeds. Its input is the current colony state, and its outputs are violation reports plus applied consequences (for example, status updates when critical constraints fail). The module keeps rules explicit and separates detection from consequence application, which makes failures easier to debug and test. Integration dependencies are temporal and structural: Module 3 depends on Module 1 state and runs before planning and adversarial selection, ensuring later modules operate on logically valid conditions.
 
 ### 3.4 Module 4: Game Theory / Director (`src/module4_game_theory`)
-**Purpose:** Select disruptive events that maximize pressure under constraints.  
-**Inputs:** Colony vulnerability indicators, event options, difficulty settings, budget/cooldowns.  
-**Outputs:** Selected event or no-event decision.  
-**Design choices:**
-- Minimax-style adversarial selection and related search strategies.
-- Budget and cooldown constraints prevent repetitive degenerate play.
-- Optional RL bias allows adaptive event preference tuning over time.
-**Integration dependencies:** reads state/rule outcomes; sends event to module 5.
+The purpose of Module 4 is to choose adversarial disruptions that pressure the colony at the right moment. It takes as input vulnerability indicators derived from the current state, available event candidates, and control constraints such as difficulty, budget, and cooldown, and it outputs a selected event (or a no-event decision when constraints block selection). The core approach combines adversarial reasoning with fairness limits so challenge remains strategic without becoming repetitive, with optional learning bias for adaptation over time. Integration dependencies are straightforward: it consumes outputs from state and rule evaluation stages, then passes the selected disruption to Module 5 for application.
 
 ### 3.5 Module 5: Event Application Logic (`src/module5_events`)
-**Purpose:** Apply event effects safely and consistently.  
-**Inputs:** Current state + selected event.  
-**Outputs:** Mutated state and structured resolution report.  
-**Design choices:**
-- Centralized resolver avoids scattered side-effect logic.
-- Explicit handlers for station degradation, targeted hazards, and cascades.
-- Deterministic transitions allow reproducible tests and debugging.
-**Integration dependencies:** consumes module 4 output and produces post-event state for module 6.
+The purpose of Module 5 is to apply disruption effects consistently and predictably to the live colony state. Its inputs are the selected event from Module 4 and the current state snapshot, and its outputs are the mutated state plus a structured resolution report describing what changed. The main design choice is to keep event mutation logic centralized, with explicit handlers for station degradation, targeted hazards, and cascading effects so transitions stay auditable. Integration dependencies are critical here: Module 5 depends on Module 4 event output and produces the post-event state that Module 6 uses for survival assessment.
 
 ### 3.6 Module 6: RL / Heuristics (`src/module6_rl`)
-**Purpose:** Compute survival/risk assessment and support adaptive learning hooks.  
-**Inputs:** Post-resolution state and transition context.  
-**Outputs:** Assessment dictionary (risk, threats, time-to-failure), optional Q-table updates.  
-**Design choices:**
-- Heuristic path provides interpretable baseline behavior.
-- Tabular Q-learning over discretized states keeps learning bounded and explainable.
-- Policy persistence in `.rl_cache` supports cross-run carryover.
-**Integration dependencies:** consumes final turn state and can inform future strategic behavior.
+The purpose of Module 6 is to estimate survival risk after each turn and provide a bounded adaptation mechanism. It takes as input the post-resolution colony state and transition context, and it outputs an assessment dictionary (risk level, critical threats, and time-to-failure indicators) with optional Q-table updates. It uses a simple heuristic baseline with tabular Q-learning on top, and carries learned values across runs to retain adaptation over time. Integration dependencies place this module at the end of the pipeline: it consumes Module 5 output and produces risk information that can guide future strategic behavior and tuning.
 
 ## 4. Evaluation Methodology
-Evaluation was designed to answer two questions: (1) does each module satisfy its contract, and (2) does the full pipeline behave coherently when modules interact?
+The evaluation was designed to verify both local correctness and full-system behavior. At the module level, we evaluated whether each component met its stated contract (state updates, planning outputs, rule enforcement, event selection, event application, and risk assessment). At the integration level, we evaluated whether those components remained coherent when executed in sequence across a full turn, including fairness constraints in adversarial selection, failure semantics such as death handling and station degradation, and multi-step state carryover behavior.
 
-### 4.1 What Was Evaluated
-- Module-level correctness for all six modules.
-- Integration behavior across the full turn sequence.
-- Adversarial fairness mechanics (budget and cooldown effects).
-- Failure semantics (agent death handling, station failure progression, recovery behavior).
-- Multi-floor and progression stability where implemented.
+We used four main metric types: test pass/fail outcomes, assertion-level checks on expected state transitions, cross-module consistency checks in integration scenarios, and consistency checks under seeded conditions. The test setup used a standard Python unit-testing framework with both unit and integration suites executed through a unified test runner and discovery process. Test data was intentionally synthetic and controlled so expected outputs could be validated precisely, and runtime behavior was also observed in both engine-only and visual demonstration modes to confirm that automated checks matched gameplay execution.
 
-### 4.2 Metrics
-- Test pass/fail counts from unit and integration suites.
-- Deterministic assertion checks on specific state transitions.
-- Cross-module regression checks in integration scenarios.
-- Stability indicators under seeded deterministic setups.
-
-### 4.3 Setup and Data
-- Test framework: Python `unittest`.
-- Runner: `run_tests.py`, with modular and integration discovery.
-- Data: synthetic deterministic states for controlled expected outcomes.
-- Runtime checks: engine-only (`main.py`) and visual (`visual_game.py`) demonstrations.
-
-### 4.4 Collection Process
-1. Run full test suite and record total pass/fail.
-2. Verify module-specific edge-case assertions.
-3. Validate integration flow and turn report consistency.
-4. Compare checkpoint logs and reports to observed outcomes.
-
-### 4.5 Evaluation Artifact Placeholder
-**[Table 1 Placeholder: Evaluation summary matrix]**  
-Include rows for each module and integration suite, with columns: "What tested", "Evidence", "Outcome", and "Notes".
+Results were collected in a staged process: run the full suite, inspect module-specific edge cases, confirm turn-pipeline consistency in structured outputs, and cross-check findings against checkpoint reports and demo observations. This method ensured that reported claims were tied to repeatable evidence rather than one-off runs. **[Table 1 Placeholder: Evaluation summary matrix]** should summarize this section with rows for each module and integration area, using columns for what was evaluated, evidence type, outcome, and key notes.
 
 ## 5. Results
-The implemented system demonstrates stable module integration and evidence-backed correctness. Reported final project evidence indicates all automated tests passed (`118/118`) at the documented checkpoint run. More importantly, behavior aligns with architecture intent: state consistency, deterministic phase progression, and explicit inter-module dependencies.
+As a complete game system, The Colony Manager delivers a consistent survival loop where player planning and adversarial pressure meaningfully interact each turn. In successful runs, players can recover from disruptions by rerouting agents, prioritizing critical resources, and stabilizing damaged stations before pressure compounds. The game therefore creates the intended tension: decisions that look reasonable in isolation can still fail when resource decay, travel cost, and event timing overlap.
 
-### 5.1 Strengths
-- **Coherent architecture:** all six modules function through one shared state contract.
-- **Strong test-backed behavior:** edge cases and cross-module interactions are explicitly validated.
-- **Reproducibility:** seeded world and deterministic tests support consistent verification.
-- **Fair adversarial dynamics:** Director constraints improve challenge quality and reduce trivial spam.
-- **Traceable state transitions:** centralized event resolution and structured reports simplify debugging.
+The strongest outcome is that the full pipeline behaves coherently during live play. Rule enforcement, planning outcomes, director decisions, and event resolution produce state changes that are understandable from one turn to the next, which makes both gameplay and debugging more reliable. Budget and cooldown constraints also improved adversarial pacing by preventing repetitive disruption patterns and encouraging more varied pressure over time.
 
-### 5.2 Weaknesses
-- **RL granularity limitations:** discretized tabular states compress nuanced colony conditions.
-- **UI maintenance risk:** `visual_game.py` has broad responsibilities and increased complexity.
-- **Evaluation realism limits:** no external benchmark dataset or broad player telemetry study.
-
-### 5.3 Suggested Results Artifacts
-**[Figure 2 Placeholder: Test coverage by module]**  
-Bar chart showing approximate number of tests/assertion groups per module plus integration group.
-
-**[Figure 3 Placeholder: Failure and recovery timeline]**  
-Timeline of one adverse scenario (event -> station degradation -> player response -> recovery/failure state).
-
-### 5.4 Example Results Table Content (for Table 1)
-| Area | Evidence | Outcome |
-|---|---|---|
-| State validity | Unit tests | Pass |
-| Search planning | Unit + integration tests | Pass |
-| Rule enforcement | Unit tests | Pass |
-| Director constraints | Unit tests | Pass |
-| Event resolver transitions | Unit tests | Pass |
-| Survival assessment | Unit tests | Pass |
-| Full suite | Unified runner | 118/118 Pass |
+The main weaknesses are visible at the game level as well. Adaptive behavior remains limited by coarse state discretization in the learning layer, so strategic adjustment can feel broad rather than nuanced. In addition, the visual/client side carries substantial orchestration responsibility, which slows iteration and can make balancing harder as features grow. These results suggest the core loop is solid, but future work should focus on deeper adaptation quality, cleaner UI architecture, and broader playtesting data for difficulty tuning.
 
 ## 6. Proposal Delta
-The final system follows the proposed six-module structure but diverges in several major implementation decisions:
+The final project stayed aligned with the original proposal at the architecture level: the same six required modules were implemented, and the core survival loop (state, planning, logic, adversarial choice, event application, and assessment) remained intact. What changed was not the module count or topic coverage, but how aggressively each module was scoped in the final game. Early proposal language emphasized near-optimal adversarial pressure and broader adaptation ambitions, while the final build prioritized consistency, playability, and integration reliability.
 
-1. **Adversarial fairness constraints were expanded.**  
-   The proposal emphasized challenge selection; the final system added explicit budget and cooldown controls to keep disruption behavior strategic but bounded.
+The largest change was in the adversarial layer. The proposal framed disruption selection mainly as a challenge-maximization problem driven by minimax-style search and difficulty scaling. In the final system, that logic was constrained with explicit budget and cooldown behavior so pressure remained strategic without becoming repetitive or unfair. This change was made after integration and gameplay testing showed that unconstrained disruption patterns could reduce recoverability and weaken game pacing.
 
-2. **Module 6 converged on hybrid heuristics + tabular RL.**  
-   Instead of pursuing high-complexity RL, the final implementation uses interpretable heuristics and Q-learning persistence hooks aligned with project scope.
-
-3. **Visual and demonstration features were expanded.**  
-   Additional options/presentation-facing behavior increased demonstration quality and integration visibility, with some complexity trade-off in the UI layer.
-
-4. **Terminal conditions were clarified during implementation.**  
-   Game-over semantics were refined around living-agent viability and state progression consistency.
-
-No required module was removed. Scope changes were primarily about balancing technical ambition with testability and reliability.
+The second major change was in the adaptation module. The proposal allowed either reinforcement learning or heuristics, with RL as the more ambitious direction. The final implementation settled on a hybrid approach: heuristic survival assessment with bounded tabular Q-learning support and persistence. This rescale was intentional and was made to keep learning behavior interpretable and stable within project constraints. In parallel, presentation-facing systems (menus/options, powerups, multi-floor progression support, and UI feedback) expanded more than originally described to improve demonstration quality and gameplay clarity. No required modules were dropped or merged, but Module 4 and Module 6 were rescaled for robustness, and non-core presentation features were expanded around the same six-module pipeline.
 
 ## 7. Limitations and Failure Analysis
-### 7.1 Limitation 1: Discretized RL representation
-**Observed issue:** Q-learning state buckets can merge distinct high-dimensional colony conditions into the same discrete state, reducing policy precision.  
-**Likely cause:** intentional simplification for interpretability and manageable implementation scope.  
-**Improvement path:** richer feature encoding or lightweight function approximation while preserving explainability.
+One concrete limitation is the discretized representation used in the tabular learning layer. Distinct high-dimensional colony conditions can collapse into the same state bucket, which reduces policy precision and can produce similar responses to meaningfully different situations. The likely cause is intentional simplification for interpretability and manageable implementation effort. A practical improvement path is to expand state features or adopt lightweight function approximation while preserving explainability and testability.
 
-### 7.2 Limitation 2: Visual client complexity
-**Observed issue:** `visual_game.py` centralizes rendering, input, state synchronization, and UI logic.  
-**Likely cause:** iterative feature additions in a single file during rapid development.  
-**Improvement path:** split into dedicated renderer/input/HUD/controller modules and add targeted UI regression tests.
+A second limitation is the concentration of visual and interaction responsibilities in one large client layer. Rendering, input handling, state synchronization, and display logic are tightly coupled, which increases maintenance risk and makes regressions harder to isolate. This is largely a consequence of iterative feature growth during rapid development. The direct improvement is architectural refactoring into clearer interface, rendering, and state-update components, supported by targeted regression checks.
 
-### 7.3 Limitation 3: External validity of outcomes
-**Observed issue:** evaluation is primarily simulation-based with deterministic synthetic states.  
-**Likely cause:** project focus on module correctness and integration under time constraints.  
-**Improvement path:** add repeated-seed benchmark experiments, playtesting telemetry, and comparative difficulty analysis.
-
-### 7.4 Concrete Failure Cases
-- Resource collapse when repeated adverse events align with low station availability.
-- Delayed recovery when pathfinding options are constrained.
-- Increased challenge volatility when multiple stressors stack in short windows.
+Failure behavior also appears in gameplay scenarios where multiple stressors align. For example, repeated disruptions during low station availability can trigger rapid resource collapse before recovery actions complete, and constrained movement paths can delay response enough to amplify losses. These failures are useful diagnostic signals rather than isolated bugs: they indicate where balancing, route robustness, and adaptive policy quality should be improved in future iterations. A stronger benchmark suite with repeated seeds and staged stress tests would make these failure patterns easier to quantify and compare over time.
 
 ## 8. Individual Contributions
-Project work was shared evenly across the full timeline. Early modules were developed collaboratively, and later responsibilities were split across implementation support, integration/testing, presentation development, and final documentation.
+Work was divided evenly across the project timeline. Early module development was collaborative, and later tasks were split by focus area while maintaining equal overall effort.
 
-- **Adam Alvarado (50%)**: Core module implementation support, integration contributions, presentation development, and final paper preparation.
-- **Rick King (50%)**: Core module implementation support, engine orchestration contributions, and testing pipeline contributions.
+- **Adam Alvarado — 50%**: co-developed core systems, contributed to integration and gameplay polish, led presentation materials, and prepared the final paper.
+- **Rick King — 50%**: co-developed core systems, contributed to integration and engine-side coordination, and led testing and verification support.
 
-Total effort allocation: **100%**.
+Combined contribution: **100%**.
 
 ## 9. Conclusions and Future Work
 The Colony Manager achieved its primary goal: integrating six AI course topics into one coherent survival system with explicit module boundaries and test-backed behavior. The project demonstrates how planning, symbolic constraints, adversarial reasoning, and adaptive assessment can be composed in a deterministic architecture without sacrificing readability or evidence quality.
 
-Future work should focus on:
-1. Refactoring visual/UI orchestration for maintainability.
-2. Expanding empirical evaluation with repeated-seed and telemetry-based studies.
-3. Improving adaptation quality with richer learning representations.
-4. Formalizing stage/campaign progression for long-horizon strategy analysis.
-5. Running controlled comparisons among adversarial algorithms under fixed constraints.
+Future work is centered on making the game feel more complete and strategically richer. A major priority is updating visuals and graphics so the game better reflects the quality of the underlying systems and provides clearer player feedback during high-pressure turns. Another key goal is introducing moving objects and dynamic hazards so planning algorithms such as A* must adapt to changing map conditions rather than primarily static terrain constraints. We also want to build a conclusive campaign mode that gives runs a stronger beginning-to-end structure with clearer progression and final objectives. Beyond that, the project can continue expanding core game features to improve depth, replayability, and challenge variety while preserving the current architecture’s modular design.
 
 ## 10. References
 [1] P. E. Hart, N. J. Nilsson, and B. Raphael, "A Formal Basis for the Heuristic Determination of Minimum Cost Paths," *IEEE Transactions on Systems Science and Cybernetics*, vol. 4, no. 2, pp. 100-107, 1968.  
